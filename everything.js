@@ -1,220 +1,221 @@
- for (let i = window.requestAnimationFrame(function() {}); i > 0; i--)
-        window.cancelAnimationFrame(i);
-    var c = document.getElementById("m"),
-        ctx = c.getContext("2d");
-    ctx.imageSmoothingEnabled = false;
+for (let i = window.requestAnimationFrame(function () { }); i > 0; i--)
+    window.cancelAnimationFrame(i);
+var c = document.getElementById("m"),
+    ctx = c.getContext("2d");
+ctx.imageSmoothingEnabled = false;
 const BASE_W = 640;
 const BASE_H = 360;
 
 function resizeCanvas() {
-  const maxScale = Math.min(
-    window.innerWidth / BASE_W,
-    window.innerHeight / BASE_H
-  );
+    const maxScale = Math.min(
+        window.innerWidth / BASE_W,
+        window.innerHeight / BASE_H
+    );
 
-  // Snap to half-integer scales
-  const scale = Math.max(0.5, Math.floor(maxScale * 4) / 4);
+    // Snap to half-integer scales
+    const scale = Math.max(0.5, Math.floor(maxScale * 4) / 4);
 
-  c.style.width = `${BASE_W * scale}px`;
-  c.style.height = `${BASE_H * scale}px`;
+    c.style.width = `${BASE_W * scale}px`;
+    c.style.height = `${BASE_H * scale}px`;
 }
 
 window.addEventListener("resize", resizeCanvas);
 resizeCanvas();
-    class Input {
-  constructor(canvas) {
-    this.canvas = canvas;
+class Input {
+    constructor(canvas) {
+        this.canvas = canvas;
 
-    this.mouseX = 0;
-    this.mouseY = 0;
-    this.pmouseX = 0;
-    this.pmouseY = 0;
+        this.mouseX = 0;
+        this.mouseY = 0;
+        this.pmouseX = 0;
+        this.pmouseY = 0;
 
-    this.mouseXW = 0;
-    this.mouseYW = 0;
+        this.mouseXW = 0;
+        this.mouseYW = 0;
 
-    this.mouseDown = false;
-    this.mousePressed = false;
-    this.mouseDuration = 0;
+        this.mouseDown = false;
+        this.mousePressed = false;
+        this.mouseDuration = 0;
 
-    this.keys = {};
-    this.scroll = 0;
+        this.keys = {};
+        this.scroll = 0;
 
-    this.ls = { x: 0, y: 0 };
-    this.rs = { x: 0, y: 0 };
+        this.ls = { x: 0, y: 0 };
+        this.rs = { x: 0, y: 0 };
 
-    this.targetLS = { x: 0, y: 0 };
-    this.targetRS = { x: 0, y: 0 };
+        this.targetLS = { x: 0, y: 0 };
+        this.targetRS = { x: 0, y: 0 };
 
-    this.buttons = {};
-    this.lb = [0, 0];
-    this.rb = [0, 0];
+        this.buttons = {};
+        this.lb = [0, 0];
+        this.rb = [0, 0];
 
-    this.d = [0, 0, 0, 0];
-    this.g = [0, 0, 0, 0];
+        this.d = [0, 0, 0, 0];
+        this.g = [0, 0, 0, 0];
 
-    this.gamepad = null;
+        this.gamepad = null;
 
-    canvas.addEventListener("mousedown", () => {
-      this.mouseDown = true;
-      this.mousePressed = true;
-    });
+        canvas.addEventListener("mousedown", () => {
+            this.mouseDown = true;
+            this.mousePressed = true;
+        });
 
-    window.addEventListener("mouseup", () => {
-      this.mouseDown = false;
-    });
+        window.addEventListener("mouseup", () => {
+            this.mouseDown = false;
+        });
 
-    window.addEventListener("mousemove", event => {
-      const rect = canvas.getBoundingClientRect();
+        window.addEventListener("mousemove", event => {
+            const rect = canvas.getBoundingClientRect();
 
-      this.pmouseX = this.mouseX;
-      this.pmouseY = this.mouseY;
+            this.pmouseX = this.mouseX;
+            this.pmouseY = this.mouseY;
 
-      // Convert browser coordinates into 640x360 canvas coordinates.
-      this.mouseX =
-        (event.clientX - rect.left) * canvas.width / rect.width;
+            // Convert browser coordinates into 640x360 canvas coordinates.
+            this.mouseX =
+                (event.clientX - rect.left) * canvas.width / rect.width;
 
-      this.mouseY =
-        (event.clientY - rect.top) * canvas.height / rect.height;
-    });
+            this.mouseY =
+                (event.clientY - rect.top) * canvas.height / rect.height;
+        });
 
-    window.addEventListener("keydown", event => {
-      this.keys[event.key] = true;
-    });
+        window.addEventListener("keydown", event => {
+            event.preventDefault();
+            this.keys[event.key] = true;
+        });
 
-    window.addEventListener("keyup", event => {
-      delete this.keys[event.key];
-    });
+        window.addEventListener("keyup", event => {
+            delete this.keys[event.key];
+        });
 
-    canvas.addEventListener("wheel", event => {
-      event.preventDefault();
-      this.scroll -= event.deltaY;
-    }, { passive: false });
-  }
-
-  get mouseDX() {
-    return this.mouseX - this.pmouseX;
-  }
-
-  get mouseDY() {
-    return this.mouseY - this.pmouseY;
-  }
-
-  isKeyDown(key) {
-    return !!this.keys[key];
-  }
-  updatePre(){
-    const gamepads = navigator.getGamepads();
-
-    this.gamepad = null;
-
-    for (let i = gamepads.length - 1; i >= 0; i--) {
-      if (gamepads[i]?.connected) {
-        this.gamepad = gamepads[i];
-        break;
-      }
+        canvas.addEventListener("wheel", event => {
+            event.preventDefault();
+            this.scroll -= event.deltaY;
+        }, { passive: false });
     }
 
-    if (this.gamepad) {
-      this.updateGamepad(this.gamepad);
-    } else {
-      this.updateKeyboard();
-      this.smoothSticks();
-    
-  }
-  }
-  updatePost() {
-    if (this.mouseDown) {
-      this.mouseDuration++;
-    } else {
-      this.mouseDuration = 0;
+    get mouseDX() {
+        return this.mouseX - this.pmouseX;
     }
 
-    // Just been pressed
-    this.mousePressed = false;
-
-  
-    this.pmouseX = this.mouseX;
-    this.pmouseY = this.mouseY;
-
-    
-
-  }
-  updateGamepad(gamepad) {
-    this.buttons = {};
-
-    for (let i = 0; i < gamepad.buttons.length; i++) {
-      if (gamepad.buttons[i].pressed) {
-        this.buttons[i] = true;
-      }
+    get mouseDY() {
+        return this.mouseY - this.pmouseY;
     }
 
-    this.lb[0] = this.buttons[4] || this.buttons[6] ? 1 : 0;
-    this.rb[0] = this.buttons[5] || this.buttons[7] ? 1 : 0;
-
-    this.ls.x = this.axis(gamepad.axes[0]);
-    this.ls.y = -this.axis(gamepad.axes[1]);
-
-    this.rs.x = this.axis(gamepad.axes[2]);
-    this.rs.y = -this.axis(gamepad.axes[3]);
-  }
-
-  updateKeyboard() {
-  
-    this.targetLS.x = this.isKeyDown("d") - this.isKeyDown("a");
-    this.targetLS.y = this.isKeyDown("w") - this.isKeyDown("s");
-
-    this.targetRS.x = this.isKeyDown("ArrowRight") - this.isKeyDown("ArrowLeft");
-    this.targetRS.y = this.isKeyDown("ArrowUp") - this.isKeyDown("ArrowDown");
-  }
-   smoothSticks() {
-    this.ls.x = this.smooth(this.ls.x, this.targetLS.x);
-    this.ls.y = this.smooth(this.ls.y, this.targetLS.y);
-
-    this.rs.x = this.smooth(this.rs.x, this.targetRS.x);
-    this.rs.y = this.smooth(this.rs.y, this.targetRS.y);
-
-    this.normalizeStick(this.ls);
-    this.normalizeStick(this.rs);
-  }
-  smooth(value, target) {
-    return Math.lerp(
-      value,
-      target,
-      0.7 / (Math.abs(value - target) + 0.7)
-    );
-  }
-
-  normalizeStick(stick) {
-    const length = Math.hypot(stick.x, stick.y);
-
-    if (length > 1) {
-      stick.x /= length;
-      stick.y /= length;
+    isKeyDown(key) {
+        return !!this.keys[key];
     }
-  }
+    updatePre() {
+        const gamepads = navigator.getGamepads();
 
-  axis(value) {
+        this.gamepad = null;
+
+        for (let i = gamepads.length - 1; i >= 0; i--) {
+            if (gamepads[i]?.connected) {
+                this.gamepad = gamepads[i];
+                break;
+            }
+        }
+
+        if (this.gamepad) {
+            this.updateGamepad(this.gamepad);
+        } else {
+            this.updateKeyboard();
+            this.smoothSticks();
+
+        }
+    }
+    updatePost() {
+        if (this.mouseDown) {
+            this.mouseDuration++;
+        } else {
+            this.mouseDuration = 0;
+        }
+
+        // Just been pressed
+        this.mousePressed = false;
+
+
+        this.pmouseX = this.mouseX;
+        this.pmouseY = this.mouseY;
+
+
+
+    }
+    updateGamepad(gamepad) {
+        this.buttons = {};
+
+        for (let i = 0; i < gamepad.buttons.length; i++) {
+            if (gamepad.buttons[i].pressed) {
+                this.buttons[i] = true;
+            }
+        }
+
+        this.lb[0] = this.buttons[4] || this.buttons[6] ? 1 : 0;
+        this.rb[0] = this.buttons[5] || this.buttons[7] ? 1 : 0;
+
+        this.ls.x = this.axis(gamepad.axes[0]);
+        this.ls.y = -this.axis(gamepad.axes[1]);
+
+        this.rs.x = this.axis(gamepad.axes[2]);
+        this.rs.y = -this.axis(gamepad.axes[3]);
+    }
+
+    updateKeyboard() {
+
+        this.targetLS.x = this.isKeyDown("d") - this.isKeyDown("a");
+        this.targetLS.y = this.isKeyDown("w") - this.isKeyDown("s");
+
+        this.targetRS.x = this.isKeyDown("ArrowRight") - this.isKeyDown("ArrowLeft");
+        this.targetRS.y = this.isKeyDown("ArrowUp") - this.isKeyDown("ArrowDown");
+    }
+    smoothSticks() {
+        this.ls.x = this.smooth(this.ls.x, this.targetLS.x);
+        this.ls.y = this.smooth(this.ls.y, this.targetLS.y);
+
+        this.rs.x = this.smooth(this.rs.x, this.targetRS.x);
+        this.rs.y = this.smooth(this.rs.y, this.targetRS.y);
+
+        this.normalizeStick(this.ls);
+        this.normalizeStick(this.rs);
+    }
+    smooth(value, target) {
+        return Math.lerp(
+            value,
+            target,
+            0.7 / (Math.abs(value - target) + 0.7)
+        );
+    }
+
+    normalizeStick(stick) {
+        const length = Math.hypot(stick.x, stick.y);
+
+        if (length > 1) {
+            stick.x /= length;
+            stick.y /= length;
+        }
+    }
+
+    axis(value) {
         return Math.sign(value) * Math.sqrt(Math.round(value * value * 20) / 20);
-  }
- stickDirection(stick, x, y, threshold = 0.6) {
-    return stick.x * x + stick.y * y >= threshold;
-  }
- left(stick = this.ls, threshold = 0.6) {
-    return this.stickDirection(stick, -1, 0, threshold);
-  }
+    }
+    stickDirection(stick, x, y, threshold = 0.6) {
+        return stick.x * x + stick.y * y >= threshold;
+    }
+    left(stick = this.ls, threshold = 0.6) {
+        return this.stickDirection(stick, -1, 0, threshold);
+    }
 
-  right(stick = this.ls, threshold = 0.6) {
-    return this.stickDirection(stick, 1, 0, threshold);
-  }
+    right(stick = this.ls, threshold = 0.6) {
+        return this.stickDirection(stick, 1, 0, threshold);
+    }
 
-  up(stick = this.ls, threshold = 0.6) {
-    return this.stickDirection(stick, 0, 1, threshold);
-  }
+    up(stick = this.ls, threshold = 0.6) {
+        return this.stickDirection(stick, 0, 1, threshold);
+    }
 
-  down(stick = this.ls, threshold = 0.6) {
-    return this.stickDirection(stick, 0, -1, threshold);
-  }
+    down(stick = this.ls, threshold = 0.6) {
+        return this.stickDirection(stick, 0, -1, threshold);
+    }
 }
 
 const input = new Input(document.getElementById("m"));
@@ -2097,6 +2098,10 @@ const input = new Input(document.getElementById("m"));
             this.xv = 0;
             this.yv = 0;
 
+            this.shx = 0;
+            this.shy = 0;
+            this.shstr=0;
+
             this.target = target;
 
             this.strength = 0.6;
@@ -2116,18 +2121,28 @@ const input = new Input(document.getElementById("m"));
                 this.strength,
                 this.damping,
             );
-            this.x = Math.smoothMax(Math.smoothMin(this.x, level.width * 32 - 160, 32), 160, 32)
-            this.y = Math.smoothMax(Math.smoothMin(this.y, level.height * 32 - 90, 32), 90, 32)
+            let plr=Player.entity.hitbox;
+            if(plr.onGround&&Math.abs(plr.totalv-plr.ptotalv)>4){
+                this.shstr+=Math.abs(plr.totalv-plr.ptotalv)*0.6;
+            }
+            this.shx+=(Math.random()-0.5)*this.shstr;
+            this.shy+=(Math.random()-0.5)*this.shstr;
+            this.shx/=1.1;
+            this.shy/=1.1;
+            this.shstr/=1.1;
+       
+            this.x = Math.smoothMax(Math.smoothMin(this.x, level.width * 32 - 160, 32), 160, 32)+this.shx;
+            this.y = Math.smoothMax(Math.smoothMin(this.y, level.height * 32 - 90, 32), 90, 32)+this.shy;
         }
         snap() {
-            if (!this.target) return;
+            if (!this.target) return; 
             this.x = this.target.cx;
             this.y = this.target.cy;
             this.xv = 0;
             this.yv = 0;
         }
-    }
-    class EntityHandler {
+    } 
+    class EntityHandler { 
         constructor(maxSize = 15300) {
             this.entities = [];
             this.vertexBuffer = new Float32Array(maxSize);
@@ -2175,7 +2190,7 @@ const input = new Input(document.getElementById("m"));
     }
 
     let entityHandler = new EntityHandler();
-    entityHandler.add(new Humanoid(64, 64, 1.001, "player"));
+    entityHandler.add(new Humanoid(64, 128, 1.001, "player"));
     for (var i = 0; i < 1; i++) {
         entityHandler.add(new ArachnidBoss(828, 64, 1.0018, "spider"));
     }
@@ -2184,8 +2199,7 @@ const input = new Input(document.getElementById("m"));
     let Player = {};
     Player.entity = entityHandler.entities[0];
 
-    Player.entity.hitbox.x = 64;
-    Player.entity.hitbox.y = 64;
+
     //(owner,node1,node2, x,y,w,h)
     Player.sword = new Weapon(Player.entity, 6, 4, 0, 1, 32, 64, "rustySword");
     entityHandler.add(Player.sword);
