@@ -1,1 +1,350 @@
+<!DOCTYPE html>
+<html>
+<!--
+https://www.khanacademy.org/computer-programming/spin-off-of-quality-adjust/5413831897628672?width=640&height=360&editor=no
+-->
+<title>Spin-off of "quality adjust"</title>
 
+<style>
+ html, body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    image-rendering: pixelated;
+}
+
+#canvas_wrapper {
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+
+#m {
+    width: 100%;
+    height: auto; 
+    aspect-ratio: 16 / 9;
+    image-rendering: pixelated;
+}
+</style>
+<div id="canvas_wrapper">
+    <canvas id="m" width="640" height="360"></canvas>
+</div>
+<script id="script1" src="https://cdn.jsdelivr.net/gh/Bearkirb/honestBankerScriptRepo@27a78d1f974fed3fdd9084298d100f8cd1909525/testTilemaps.js"></script>
+<script id='vertex-shader' type='glsl'>#version 300 es
+layout(location=0) in vec3 coordinates;
+layout(location=1) in vec3 uv;
+precision highp float;
+uniform float iTime;
+uniform vec3 camera;
+out vec3 pos;
+out vec3 uvi;
+void main(){
+    float fov=1.0;
+    
+    pos=coordinates/vec3(160.0,90.0,1.0);
+    pos.z-=1.0;
+    pos.z/=1.5;
+    pos.z+=1.0;
+    pos-=camera.xyz/vec3(160.0,90.0,1.0);
+   // pos*=mat3(camera);
+//    no*=mat3(camera);
+    uvi=uv;
+   float zd=pos.z * fov;
+   gl_Position=vec4(pos.x/zd,pos.y/zd,zd/10.0-1.0,1.0);
+}
+
+</script>
+<script id='fragment-shader' type='glsl'>#version 300 es
+      
+precision highp float;
+uniform vec3 camera;
+uniform vec3 lightPos[8]; 
+in vec3 pos;
+in vec3 no;
+in vec3 uvi;
+precision highp sampler2D;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+
+out vec4 fragColor;
+
+
+void main(){
+vec3 fragCoord=gl_FragCoord.rgb;
+vec4 icol=texelFetch(iChannel0,ivec2(uvi.xy*1.0),0);
+
+if(icol.a<0.1){
+	discard;
+}
+fragColor=icol;
+//fragColor.rgb=vec3(pos.z/2.0);
+
+vec3 norm=normalize(texelFetch(iChannel1,ivec2(uvi.xy),0).rgb-vec3(0.5,0.5,0.0));
+norm.z=(norm.z*norm.z);
+
+norm*=vec3(1.0,1.0,1);
+norm=normalize(norm);
+
+vec3 to=(pos+(camera-lightPos[0])/vec3(180.0,90,1));
+float lt=max(dot(norm,normalize(to))*0.1+0.04,0.0);
+float lilen=dot(to,to)+0.4;
+for(int i=1;i<8;i++){
+	if(!(lightPos[i].x==0.0)){
+to=(pos+(camera-lightPos[i])/vec3(180.0,90,1));
+lt+=max(dot(norm,normalize(to))*0.1+0.04,0.0);
+lilen=min(lilen,dot(to,to)+0.4);
+}
+}
+lt*=1.3;
+lt/=lilen;
+//max((dot(normal, lightDir) + wrap) / (1.0 + wrap), 0.0);
+float li=1.0-(atan(abs(pos.z-1.0)*2.0)/1.57);
+fragColor.rgb=fragColor.rgb*li*1.5;
+fragColor.rgb+=pow(max(lt,0.0),4.0)*0.915*vec3(1.0,0.8,0.6);
+fragColor.rgb*=lt;
+
+
+fragColor.rgb=mix(fragColor.rgb,vec3(0.4,0.38,0.36)/(1.0+3.0*max(pos.z-1.0,0.0)),1.0-exp(-max(pos.z-1.0,0.0) * 1.0-0.07/(lilen-0.2)));
+
+//fragColor.rgb=to;
+fragColor.a=icol.a;
+//fragColor.rgb=vec3(lilen);
+
+//fragColor.rgb=abs(normalize(norm));
+}
+</script>
+<script id='ppfxDefault' type='glsl'>#version 300 es
+layout(location=0) in vec2 aPosition;
+out vec2 vuv;
+void main(){
+    gl_Position=vec4(aPosition, 0.0, 1.0);
+    vuv=aPosition * 0.5 + 0.5;
+}
+</script>
+<script id='bloom-shader' type='glsl'>#version 300 es
+       
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D iChannel0;
+uniform float iTime;
+uniform vec3 cam;
+uniform vec3 pcam;
+uniform float hdr;
+out vec4 fragColor;
+
+vec4 texelFetchLinear(sampler2D tex, vec2 coord, int lod)
+{
+    // Integer base coordinate
+    ivec2 iCoord=ivec2(floor(coord));
+    
+    vec2 f=fract(coord);
+	f=f * f * (3.0 - 2.0 * f);
+    vec4 t00=texelFetch(tex, iCoord, lod);
+    vec4 t10=texelFetch(tex, iCoord + ivec2(1, 0), lod);
+    vec4 t01=texelFetch(tex, iCoord + ivec2(0, 1), lod);
+    vec4 t11=texelFetch(tex, iCoord + ivec2(1, 1), lod);
+    vec4 tx0=mix(t00, t10, f.x);
+    vec4 tx1=mix(t01, t11, f.x);
+    return mix(tx0, tx1, f.y);
+}
+vec4 tex(vec2 uv,float mip){
+return texelFetchLinear(iChannel0,vec2(uv/exp2(mip)),int(mip));
+}
+vec3 ACES(vec3 x)
+{
+    const float a=2.51;
+    const float b=0.03;
+    const float c=2.43;
+    const float d=0.59;
+    const float e=0.14;
+    return (x * (a * x + b)) / (x * (c * x + d) + e);
+}
+
+float hash21(vec2 p) {
+    uvec2 q = uvec2(ivec2(p)) * uvec2(1597334677u, 3817691659u);
+    uint h = (q.x ^ q.y) * 1597334677u;
+    return float(h) * (1.0 / 4294967296.0);
+}
+
+const float scale=1.0;
+  void main(){
+    vec2 fragCoord= gl_FragCoord.xy;
+
+    vec2 iResolution=vec2(640.0,360.0);
+    fragColor.rgb=texelFetch(iChannel0,ivec2(fragCoord.xy),0).rgb/2.0;
+    
+   fragColor.rgb+=texelFetchLinear(iChannel0,vec2(fragCoord.xy/8.0-vec2(1)+vec2(hash21(fragCoord),hash21(fragCoord))),3).rgb/2.0;
+   fragColor.rgb+=texelFetchLinear(iChannel0,vec2(fragCoord.xy/4.0-vec2(0.5)),2).rgb;
+
+fragColor.rgb/=2.0;
+
+//fragColor.rgb=ACES(fragColor.rgb*2.0)*1.1;
+
+ 
+
+   
+
+    fragColor.a=1.;
+
+
+	}
+
+  
+</script>
+<script id='boring-shader' type='glsl'>#version 300 es
+       
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D iChannel0;
+uniform float iTime;
+uniform vec3 cam;
+uniform vec3 pcam;
+uniform float hdr;
+out vec4 fragColor;
+
+vec3 ACES(vec3 x)
+{
+    const float a=2.51;
+    const float b=0.03;
+    const float c=2.43;
+    const float d=0.59;
+    const float e=0.14;
+    return (x * (a * x + b)) / (x * (c * x + d) + e);
+}
+
+
+
+const float scale=1.0;
+  void main(){
+    vec2 fragCoord= gl_FragCoord.xy+vec2(0.5);
+
+    vec2 iResolution=vec2(640.0,360.0);
+    
+   
+     
+ fragColor.rgb=vec3(0.0);
+ fragColor.r+=texelFetch(iChannel0,ivec2(fragCoord-vec2(1.0,0.0)),0).r*0.5;
+ fragColor.g+=texelFetch(iChannel0,ivec2(fragCoord),0).g*0.45;
+ fragColor.b+=texelFetch(iChannel0,ivec2(fragCoord+vec2(1.0,0.0)),0).b*0.40;
+ 
+
+fragColor.rgb=ACES(fragColor.rgb*2.0)*1.1;
+
+ 
+
+   
+
+    fragColor.a=1.;
+
+
+	}
+
+  
+</script>
+<script id='composite-shader' type='glsl'>#version 300 es
+       
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+uniform float iTime;
+uniform vec3 cam;
+uniform vec3 pcam;
+uniform float hdr;
+uniform float impactFrame;
+out vec4 fragColor;
+
+vec3 ACES(vec3 x)
+{
+    const float a=2.51;
+    const float b=0.03;
+    const float c=2.43;
+    const float d=0.59;
+    const float e=0.14;
+    return (x * (a * x + b)) / (x * (c * x + d) + e);
+}
+
+
+float hash21(vec2 p) {
+    uvec2 q = uvec2(ivec2(p)) * uvec2(1597334677u, 3817691659u);
+    uint h = (q.x ^ q.y) * 1597334677u;
+    return float(h) * (1.0 / 4294967296.0);
+}
+
+const float scale=1.0;
+  void main(){
+    vec2 fragCoord= gl_FragCoord.xy;
+
+    vec2 iResolution=vec2(640.0,360.0);
+    
+   
+     
+ fragColor.rgb=vec3(0.0);
+ fragColor.r+=texelFetch(iChannel0,ivec2(fragCoord-vec2(1.0,0.0)),0).r*0.5;
+ fragColor.g+=texelFetch(iChannel0,ivec2(fragCoord),0).g*0.45;
+ fragColor.b+=texelFetch(iChannel0,ivec2(fragCoord+vec2(1.0,0.0)),0).b*0.40;
+ vec3 bl=texelFetch(iChannel1,ivec2(fragCoord),0).rgb;
+ fragColor.rgb+=pow(bl,vec3(2.0))*0.5;
+
+fragColor.rgb=ACES(fragColor.rgb*2.9)*1.1;
+
+if(impactFrame>0.01){
+  float dir=fragColor.g-length(vec2(dFdx(bl.g),dFdy(bl.g)))*fragColor.g;
+  float si=impactFrame*impactFrame*0.3;
+  vec2 cc=fragCoord-iResolution*0.5;
+  float mi=1.0*dir;
+  float lerRad=mix(hash21(vec2(105.0*atan(cc.y/cc.x))),hash21(vec2(105.0*atan(cc.y/cc.x)+1.0)),fract((105.0*atan(cc.y/cc.x))))+fragColor.g-1.4+impactFrame*3.0;
+  float m2=4.9*(1.0/(0.01*length(cc)+1.0)+0.35*lerRad)-2.2;
+  fragColor.rgb=mix(vec3(smoothstep(0.4-si,0.6+si,m2)-smoothstep(0.475-si,0.525+si,mi)),fragColor.rgb,impactFrame*impactFrame*impactFrame);
+}
+
+   
+
+    fragColor.a=1.;
+
+
+	}
+
+  
+</script>
+<script id='particle-vertex' type='glsl'>#version 300 es
+  
+precision highp float;
+layout(location=0) in vec3 position;
+layout(location=1) in vec4 color;   
+out vec4 vertColor;
+uniform vec3 camera;
+void main() {
+  
+    vec3 pos=position/vec3(160.0,90.0,1.0);
+    //pos.xy/=2.0;
+    pos.z-=1.0;
+    pos.z/=1.5;
+    pos.z+=1.0;
+    pos-=camera.xyz/vec3(160.0,90.0,1.0);
+    gl_Position = vec4(pos.x/pos.z,pos.y/pos.z,pos.z/10.0-1.0,1.0);
+
+    gl_PointSize = 2.0/pos.z;
+
+    vertColor = color;
+}
+  
+</script>
+<script id='particle-fragment' type='glsl'>#version 300 es
+precision highp float;
+in vec4 vertColor;
+out vec4 fragColor;
+
+void main() {
+    fragColor = vertColor;
+}
+</script>
+<script type="module" src="everything.js">
+   
+</script>
+
+</html>
