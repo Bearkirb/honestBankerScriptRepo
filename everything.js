@@ -3716,9 +3716,9 @@ mainMenu.add(
         onActivate: () => ui.pushScreen(settingsScreen)
     })
 );
-
+let backArtImage=await atlas.setImage(backArtSRC)
 const backArt = new UIImage({
-    image: room1Tilemap,
+    image: backArtImage,
     width: UISize.content(),
     height: UISize.content(),
 });
