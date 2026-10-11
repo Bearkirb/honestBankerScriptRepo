@@ -9,7 +9,7 @@ function resizeCanvas() {
         window.innerHeight / BASE_H
     );
 
-    // Snap to half-integer scales
+    // Snap to half-integer scales to reduce moire or whatever its called
     const scale = Math.max(0.5, Math.floor(maxScale * 4) / 4);
 
     c.style.width = `${BASE_W * scale}px`;
@@ -33,6 +33,7 @@ class Input {
 
         this.mouseDown = false;
         this.mousePressed = false;
+        this.mouseReleased = false;
         this.mouseDuration = 0;
 
         this.mrc=[];
@@ -58,14 +59,21 @@ class Input {
 
         this.gamepad = null;
 
-        canvas.addEventListener("mousedown", () => {
-            this.mouseDown = true;
-            this.mousePressed = true;
-        });
+        canvas.addEventListener("mousedown", event => {
+    this.mouseDown = true;
 
-        window.addEventListener("mouseup", () => {
-            this.mouseDown = false;
-        });
+    if (event.button === 0) {
+        this.mousePressed = true;
+    }
+});
+
+window.addEventListener("mouseup", event => {
+    this.mouseDown = false;
+
+    if (event.button === 0) {
+        this.mouseReleased = true;
+    }
+});
 
         window.addEventListener("mousemove", event => {
             const rect = canvas.getBoundingClientRect();
@@ -73,7 +81,7 @@ class Input {
             this.pmouseX = this.mouseX;
             this.pmouseY = this.mouseY;
 
-            // Convert browser coordinates into 640x360 canvas coordinates.
+            // browser coordinates to 640x360 canvas coordinates.
             this.mouseX =
                 (event.clientX - rect.left) * canvas.width / rect.width;
 
@@ -150,6 +158,7 @@ class Input {
 
         // Just been pressed
         this.mousePressed = false;
+this.mouseReleased = false;
 
 
         this.pmouseX = this.mouseX;
@@ -414,8 +423,8 @@ class UIElement {
     }
 
     measure(available, context) {
-        // Leaf elements have no content by default.
-       
+        // Leaf elements have no content until added
+   
         const preferred = this.measureContent(available, context);
         const padding = this.getPadding();
 
@@ -624,22 +633,26 @@ class UIStackLayout {
                 ? remaining * ((mainSpec.weight ?? 1) / totalFill)
                 : naturalMain;
 
-            let childCross = naturalCross;
-
-if (this.align === "stretch") {
-    childCross = crossAvailable;
+         let childCross;
+if (crossSpec.type === "percent") {
+    childCross = crossAvailable * crossSpec.value;
 } else if (crossSpec.type === "fill") {
     childCross = crossAvailable;
+} else if (crossSpec.type === "fixed") {
+    childCross = crossSpec.value;
+} else if (this.align === "stretch") {
+    childCross = crossAvailable;
+} else {
+    childCross = naturalCross;
 }
-            
-            let crossOffset = 0;
 
-            if (this.align === "center") {
-                crossOffset = (crossAvailable - childCross) / 2;
-            } else if (this.align === "end") {
-                crossOffset = crossAvailable - childCross;
-            }
+let crossOffset = 0;
 
+if (this.align === "center") {
+    crossOffset = (crossAvailable - childCross) / 2;
+} else if (this.align === "end") {
+    crossOffset = crossAvailable - childCross;
+}
             child.arrange(
                 vertical
                     ? {
@@ -709,6 +722,34 @@ class UIStack extends UIPanel {
         });
     }
 }
+
+class UIOverlayLayout extends UILayout {
+    measure(container, available, context) {
+        let width = 0;
+        let height = 0;
+
+        for (const child of container.children) {
+            const size = child.measure(available, context);
+            width = Math.max(width, size.width);
+            height = Math.max(height, size.height);
+        }
+
+        return { width, height };
+    }
+
+    arrange(container, contentBounds, context) {
+        for (const child of container.children) {
+            child.arrange({ ...contentBounds }, context);
+        }
+    }
+}
+
+class UIOverlay extends UIPanel {
+    constructor(options = {}) {
+        super(options);
+        this.layout = new UIOverlayLayout();
+    }
+}
 class UILabel extends UIElement {
     constructor({
         text = "",
@@ -723,34 +764,45 @@ class UILabel extends UIElement {
         this.textAlign = textAlign;
     }
     drawContent(renderer) {
-        
-    renderer.drawText(
-        this.text,
-        this.bounds,
-        {
-            font: this.font,
-            textAlign: this.textAlign,
-            color: this.style.color ?? "text",
-            padding: this.style.textPadding ?? 0
-        }
-    );
+    const p = this.getPadding();
+    const b = this.bounds;
+
+    renderer.drawText(this.text, {
+        x: b.x + p.left,
+        y: b.y + p.top,
+        width: Math.max(0, b.width - p.left - p.right),
+        height: Math.max(0, b.height - p.top - p.bottom)
+    }, {
+        font: this.font,
+        textAlign: this.textAlign,
+        color: this.style.color ?? "text",
+        padding: this.style.textPadding ?? 0
+    });
 }
     measureContent(available, context) {
 
     const ctx = context.ctx;
+    const theme = context?.theme;
+ctx.save();
+ctx.font =
+    theme?.fonts?.[this.font] ??
+    (this.font?.includes("px") ? this.font : "16px sans-serif");
 
-    ctx.save();
+//console.log(ctx.font,this.text)
 
-    ctx.font =
-        this.theme?.fonts?.[this.font] ??
-        this.font;
+    const text = String(this.text ?? "");
+    const metrics = ctx.measureText(text || "Mg");
 
-    const metrics = ctx.measureText(this.text);
+    const fontSize =
+        Number(this.font.match(/(\d+(?:\.\d+)?)px/)?.[1]) || 16;
 
-    const width = metrics.width;
-    const height =
+    const width = text ? metrics.width : 0; 
+    const height = Math.max(
         metrics.actualBoundingBoxAscent +
-        metrics.actualBoundingBoxDescent;
+            metrics.actualBoundingBoxDescent,
+        fontSize * 1.2
+    );
+
 
     ctx.restore();
 
@@ -901,51 +953,171 @@ ctx.font = font;
 }
 class UIButton extends UILabel {
     constructor({
-        onActivate = null,
+    onActivate = null,
+    padding = {
+        top: 6,
+        right: 12,
+        bottom: 6,
+        left: 12
+    },
+    ...options
+} = {}) {
+    super({ ...options, padding });
+
+    this.onActivate = onActivate;
+    this.hovered = false;
+    this.pressed = false;
+   
+}
+
+    activate() {
+        if (!this.enabled || !this.visible) return;
+        this.onActivate?.(this);
+    }
+
+   getDrawStyle() {
+    const style = this.style ?? {};
+
+    const background = this.pressed
+        ? (style.pressedBackground ?? "buttonPressed")
+        : this.hovered
+            ? (style.hoverBackground ?? "buttonHover")
+            : (style.background ?? "button");
+
+    return {
+        ...style,
+        background,
+    };
+}
+}
+
+
+class UIImage extends UIElement {
+    constructor({
+        src = null,
+        image = null,
+        fit = "contain",
         ...options
     } = {}) {
         super(options);
 
-        this.onActivate = onActivate;
+        this.fit = fit;
+        this.image = null;
+        this.loaded = false;
+        this.loadError = false;
 
-        this.hovered = false;
-        this.pressed = false;
+        if (image) {
+            this.setImage(image);
+        } else if (src) {
+            this.setSource(src);
+        }
     }
 
-    activate() {
-        if (!this.enabled) return;
+    setImage(image) {
+        this.image = image;
+        this.loaded =
+            image instanceof ImageBitmap ||
+            (image instanceof HTMLImageElement &&
+                image.complete &&
+                image.naturalWidth > 0);
 
-        this.onActivate?.(this);
+        this.loadError = false;
     }
 
-    getDrawStyle() {
-        return {
-            ...this.style,
+    setSource(src) {
+        const image = new Image();
 
-            background: this.pressed
-                ? (this.style.pressedBackground ?? "buttonPressed")
-                : this.hovered
-                    ? (this.style.hoverBackground ?? "buttonHover")
-                    : (this.style.background ?? "button")
+        this.image = image;
+        this.loaded = false;
+        this.loadError = false;
+
+        image.onload = () => {
+            this.loaded = true;
         };
+
+        image.onerror = () => {
+            this.loadError = true;
+        };
+
+        image.src = src;
+    }
+
+    measureContent(available, context) {
+        if (!this.loaded || !this.image) {
+            return { width: 0, height: 0 };
+        }
+
+        return {
+            width: this.image.width ?? this.image.naturalWidth,
+            height: this.image.height ?? this.image.naturalHeight
+        };
+    }
+
+    drawContent(renderer) {
+        if (!this.loaded || !this.image) return;
+
+        const p = this.getPadding();
+        const b = this.bounds;
+
+        const x = b.x + p.left;
+        const y = b.y + p.top;
+        const width = Math.max(0, b.width - p.left - p.right);
+        const height = Math.max(0, b.height - p.top - p.bottom);
+
+        if (!width || !height) return;
+
+        const image = this.image;
+        const iw = image.width ?? image.naturalWidth;
+        const ih = image.height ?? image.naturalHeight;
+
+        if (!iw || !ih) return;
+
+        let dw = width;
+        let dh = height;
+
+        if (this.fit === "contain") {
+            const scale = Math.min(width / iw, height / ih);
+            dw = iw * scale;
+            dh = ih * scale;
+        } else if (this.fit === "cover") {
+            const scale = Math.max(width / iw, height / ih);
+            dw = iw * scale;
+            dh = ih * scale;
+        }
+
+        const dx = x + (width - dw) / 2;
+        const dy = y + (height - dh) / 2;
+        const ctx = renderer.ctx;
+
+        ctx.save();
+
+        if (this.fit === "cover") {
+            ctx.beginPath();
+            ctx.rect(x, y, width, height);
+            ctx.clip();
+        }
+
+        ctx.drawImage(image, dx, dy, dw, dh);
+        ctx.restore();
     }
 }
 const defaultUITheme = {
     colors: {
         background: "rgb(0,0,0)",
-        panel: "rgb(30,40,50,0.2)",
+        panel: "rgb(30,40,50,0.1)",
         border: "#606579",
-        text: "#f1eee8",
+        text: "#334422",
         muted: "#aaaab7",
         button: "#343747",
+        focus: "#b8a0ff",
         buttonHover: "#484c61",
         buttonPressed: "#252735"
     },
 
     fonts: {
         title: '36px "Gravitas One"',
-        body: '26px "Grape Nuts"',
-        small: '12px "Grape Nuts"'
+        body: '26px "IM Fell DW Pica"',
+        small: '12px "IM Fell DW Pica"'
     },
 
     borders: {
@@ -968,20 +1140,30 @@ class UIManager {
 
         this.hoveredButton = null;
         this.pressedButton = null;
+        this.confirmWasDown = false;
     }
 
     get activeScreen() {
         return this.screenStack.at(-1) ?? null;
     }
 
-    setScreen(screen) {
+   clearScreens() {
     while (this.screenStack.length > 0) {
         const old = this.screenStack.pop();
         old.onExit?.(this);
     }
 
     this.clearPointerState();
-    this.pushScreen(screen);
+    this.focusButton(null);
+    this.blocksGameInput = false;
+}
+
+setScreen(screen) {
+    this.clearScreens();
+
+    if (screen) {
+        this.pushScreen(screen);
+    }
 }
 
 pushScreen(screen) {
@@ -989,12 +1171,14 @@ pushScreen(screen) {
         throw new TypeError("Screen must be a UIElement.");
     }
 
+    this.clearPointerState();
     this.activeScreen?.onSuspend?.(this);
 
     this.screenStack.push(screen);
     screen.onEnter?.(this);
 
     this.blocksGameInput = true;
+    this.focusButton(this.getButtons(screen)[0] ?? null);
 }
 
 popScreen() {
@@ -1068,8 +1252,9 @@ handlePointerDown(x, y, buttonIndex = 0) {
 
     if (this.pressedButton) {
         this.pressedButton.pressed = true;
+        this.focusButton(this.pressedButton);
     }
-}
+} 
 
 handlePointerUp(x, y, buttonIndex = 0) {
     if (buttonIndex !== 0) return;
@@ -1090,10 +1275,111 @@ handlePointerUp(x, y, buttonIndex = 0) {
         pressed.activate();
     }
 }
-
-    update() {
-      //Could be useful
+getButtons(element = this.activeScreen, result = []) {
+    if (!element || !element.visible || !element.enabled) {
+        return result;
     }
+
+    if (element instanceof UIButton) {
+        result.push(element);
+        return result;
+    }
+
+    for (const child of element.children) {
+        this.getButtons(child, result);
+    }
+
+    return result;
+}
+
+focusButton(button) {
+    if (this.focusedElement === button) return;
+
+    if (this.focusedElement) {
+        this.focusedElement.focused = false;
+    }
+
+    this.focusedElement = button;
+
+    if (button) {
+        button.focused = true;
+    }
+}
+
+moveFocus(direction) {
+    const buttons = this.getButtons();
+
+    if (buttons.length === 0) {
+        this.focusButton(null);
+        return;
+    }
+
+    let index = buttons.indexOf(this.focusedElement);
+
+    if (index === -1) {
+        index = 0;
+    } else {
+        index = (
+            index + direction + buttons.length
+        ) % buttons.length;
+    }
+
+    this.focusButton(buttons[index]);
+}
+
+update(input) {
+    if (!input) return;
+
+    // Mouse input
+    this.handlePointerMove(input.mouseX, input.mouseY);
+
+    if (input.mousePressed) {
+        this.handlePointerDown(input.mouseX, input.mouseY, 0);
+    }
+
+    if (input.mouseReleased) {
+        this.handlePointerUp(input.mouseX, input.mouseY, 0);
+    }
+
+    //Focus needs to be on a button that actually exists atp in time
+    const buttons = this.getButtons();
+
+    if (!buttons.includes(this.focusedElement)) {
+        this.focusButton(buttons[0] ?? null);
+    }
+
+    const directions = input.mrc ?? [];
+
+    if (
+        directions.includes("N") ||
+        directions.includes("W")
+    ) {
+        this.moveFocus(-1);
+    } else if (
+        directions.includes("S") ||
+        directions.includes("E")
+    ) {
+        this.moveFocus(1);
+    }
+
+    // Keyboard or gamepad check
+    const confirmDown =
+        input.isKeyDown("Enter") ||
+        input.isKeyDown(" ") ||
+        input.isKeyDown("Space") ||
+        (!!input.gamepad && !!input.buttons[0]);
+
+    if (
+        confirmDown &&
+        !this.confirmWasDown &&
+        this.focusedElement instanceof UIButton
+    ) {
+        this.focusedElement.activate();
+    }
+
+    this.confirmWasDown = confirmDown;
+}
+    
 
     render() {
         const screen = this.activeScreen;
@@ -1106,13 +1392,13 @@ handlePointerUp(x, y, buttonIndex = 0) {
         };
 
     
-        screen.measure(available, { ctx: this.ctx });
+        screen.measure(available, { ctx: this.ctx,theme:this.theme});
         screen.arrange({
-            x: 0,
+            x: 0, 
             y: 0,
             width: available.width,
             height: available.height
-        },{ctx:this.ctx});
+        },{ctx:this.ctx,theme:this.theme});
 
         this.ctx.clearRect(
             0, 0,
@@ -2595,7 +2881,7 @@ class PlayerAttack {
                 this.defenceMult *= pattern.defenceMult ?? 1;
                 
                 this.damageMult=Math.max(this.damageMult,10);
-                console.log(this.defenceMult)
+                
                 return name;
             }
         }
@@ -2621,11 +2907,11 @@ class PlayerAttack {
             this.player.tilt += (pose.tilt-this.player.tilt)*0.14;
         }else{
             this.hand.xv += (-this.player.hand.x)*0.1;
-            this.hand.yv += (-this.player.hand.y)*0.1;
+            this.hand.yv += ( -0.1-this.player.hand.y)*0.1;
             this.hand.xv*=0.7;
             this.hand.yv*=0.7;
           this.player.tilt *= 0.9;
-        }
+        } 
         this.player.hand.x+=this.hand.xv;
             this.player.hand.y+=this.hand.yv;
         if ((this.phase >= this.inputs.length&&this.inputs.length!=0)||this.inputs.length>10) {
@@ -3384,19 +3670,19 @@ var player = {
     pz: 0
 };
 
-
+const ui = new UIManager(c);
 const mainMenu = new UIStack({
     width: UISize.percent(1),
     height: UISize.fill(),
     direction: "column",
-    gap: 24,
-    align: "stretch",
+    gap: 10,
+    align: "start",
     padding: 28,
     style: {
         background: "panel"
     }
 }); 
-
+ 
 mainMenu.add(
     new UILabel({
         text: "Honest",
@@ -3414,31 +3700,36 @@ mainMenu.add(
         font:"title"
     }),
     new UIButton({
-        text: "Play",
+        text: "[Play]",
         textAlign: "left",
         font: "body",
-        onActivate: () => startGame()
+        onActivate: () => {
+
+        ui.setScreen(null);
+    }
     }),
 
     new UIButton({
-        text: "Settings",
+        text: "[Settings]",
         textAlign: "left",
         font: "small",
         onActivate: () => ui.pushScreen(settingsScreen)
     })
 );
 
-const root = new UIStack({
-    width: UISize.fill(),
-    height: UISize.fill(),
-    direction: "column",
-    align: "center",
-    justify: "center"
+const backArt = new UIImage({
+    image: room1Tilemap,
+    width: UISize.content(),
+    height: UISize.content(),
 });
-
+const root = new UIOverlay({
+    width: UISize.fill(),
+    height: UISize.fill()
+});
+root.add(backArt)
 root.add(mainMenu);
 
-const ui = new UIManager(c);
+
 ui.setScreen(root);
 ui.render();
 
@@ -3459,6 +3750,7 @@ function draw(now) {
 
         nextFrame += frameTime;
         input.updatePre();
+        ui.update(input);
         camera.update();
 
         gl.useProgram(compPass.program.program);
@@ -3469,7 +3761,7 @@ function draw(now) {
         gl.uniform3fv(camMat, [camera.x, camera.y, camera.z]);
         lightUniformData.fill(0);
         lightUniformData.set(level.zones.lights.subarray(0, lightUniformData.length));
-
+ 
         gl.uniform3fv(glLights, lightUniformData);
         gl.uniform1f(iTime, performance.now());
 
