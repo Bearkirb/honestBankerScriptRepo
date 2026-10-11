@@ -35,6 +35,11 @@ class Input {
         this.mousePressed = false;
         this.mouseDuration = 0;
 
+        this.mrc=[];
+        this.pup=false;
+        this.pright=false;
+        this.pdown=false;
+        this.pleft=false;
         this.keys = {};
         this.scroll = 0;
 
@@ -121,8 +126,22 @@ class Input {
             this.smoothSticks();
 
         }
+        if(this.up(this.rs)&&!this.pup){
+            this.mrc.push("N");
+        }
+        if(this.right(this.rs)&&!this.pright){
+            this.mrc.push("E");
+        }
+        if(this.down(this.rs)&&!this.pdown){
+            this.mrc.push("S");
+        }
+        if(this.left(this.rs)&&!this.pleft){
+            this.mrc.push("W");
+        }
+        
     }
     updatePost() {
+        this.mrc.length=0;
         if (this.mouseDown) {
             this.mouseDuration++;
         } else {
@@ -136,7 +155,10 @@ class Input {
         this.pmouseX = this.mouseX;
         this.pmouseY = this.mouseY;
 
-
+        this.pup=this.up(this.rs);
+        this.pright=this.right(this.rs);
+        this.pdown=this.down(this.rs);
+        this.pleft=this.left(this.rs);
 
     }
     updateGamepad(gamepad) {
@@ -241,10 +263,867 @@ const triOrder = [0, 1, 2, 0, 2, 3];
         smoothSign(x, s) {
             return x / Math.sqrt(x * x + s * s)
         },
+        catmullRom4(p0, p1, p2, p3, t) {
+    const t2 = t * t;
+    const t3 = t2 * t;
+
+    return {
+        x: 0.5 * (
+            2 * p1.x +
+            (-p0.x + p2.x) * t +
+            (2*p0.x - 5*p1.x + 4*p2.x - p3.x) * t2 +
+            (-p0.x + 3*p1.x - 3*p2.x + p3.x) * t3
+        ),
+
+        y: 0.5 * (
+            2 * p1.y +
+            (-p0.y + p2.y) * t +
+            (2*p0.y - 5*p1.y + 4*p2.y - p3.y) * t2 +
+            (-p0.y + 3*p1.y - 3*p2.y + p3.y) * t3
+        ),
+
+        tilt: 0.5 * (
+            2 * p1.tilt +
+            (-p0.tilt + p2.tilt) * t +
+            (2*p0.tilt - 5*p1.tilt + 4*p2.tilt - p3.tilt) * t2 +
+            (-p0.tilt + 3*p1.tilt - 3*p2.tilt + p3.tilt) * t3
+        )
+    };
+    },
     };
     Object.assign(Math, MathExtended);
 })();
 
+const UISize = {
+    fill: () => ({ type: "fill" }),
+    content: () => ({ type: "content" }),
+
+    percent: value => {
+        if (value < 0 || value > 1) {
+            throw new RangeError("Percentage must be between 0 and 1.");
+        }
+
+        return { type: "percent", value };
+    },
+
+    fixed: value => ({ type: "fixed", value })
+};
+class UIElement {
+    constructor({
+        width = UISize.content(),
+        height = UISize.content(),
+        padding = 0,
+        visible = true,
+        enabled = true,
+        style = {}
+    } = {}) {
+        this.parent = null;
+        this.children = [];
+
+        this.width = width;
+        this.height = height;
+        this.padding = padding;
+
+        this.visible = visible;
+        this.enabled = enabled;
+
+        this.style = style;
+
+        //Will always be calculated (unless I decide not to for some reason)
+        this.bounds = {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0
+        };
+    }
+
+    add(...children) {
+        for (const child of children) {
+            if (!(child instanceof UIElement)) {
+                throw new TypeError("Child must be a UIElement.");
+            }
+
+            if (child === this || child.containsElement(this)) {
+                throw new Error("UI elements cannot contain themselves.");
+            }
+
+            child.parent?.remove(child);
+
+            child.parent = this;
+            this.children.push(child);
+        }
+
+        return this;
+    }
+
+    remove(child) {
+        const index = this.children.indexOf(child);
+
+        if (index !== -1) {
+            this.children.splice(index, 1);
+            child.parent = null;
+        }
+
+        return this;
+    }
+
+    containsElement(element) {
+        for (const child of this.children) {
+            if (child === element || child.containsElement(element)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    getPadding() {
+        if (typeof this.padding === "number") {
+            return {
+                top: this.padding,
+                right: this.padding,
+                bottom: this.padding,
+                left: this.padding
+            };
+        }
+
+        return {
+            top: this.padding.top ?? 0,
+            right: this.padding.right ?? 0,
+            bottom: this.padding.bottom ?? 0,
+            left: this.padding.left ?? 0
+        };
+    }
+
+    resolveSize(spec, available, preferred) {
+        switch (spec.type) {
+            case "fixed":
+                return spec.value;
+
+            case "percent":
+                return available * spec.value;
+
+            case "fill":
+                return available;
+
+            case "content":
+            default:
+                return preferred;
+        }
+    }
+
+    measure(available, context) {
+        // Leaf elements have no content by default.
+       
+        const preferred = this.measureContent(available, context);
+        const padding = this.getPadding();
+
+        return {
+            width: this.resolveSize(
+                this.width,
+                available.width,
+                preferred.width + padding.left + padding.right
+            ),
+            height: this.resolveSize(
+                this.height,
+                available.height,
+                preferred.height + padding.top + padding.bottom
+            )
+        };
+    }
+
+    measureContent(available, context) {
+        return { width: 0, height: 0 };
+    }
+
+    arrange(bounds, context) {
+        
+        this.bounds = bounds;
+
+        const padding = this.getPadding();
+
+        const contentBounds = {
+            x: bounds.x + padding.left,
+            y: bounds.y + padding.top,
+            width: Math.max(
+                0,
+                bounds.width - padding.left - padding.right
+            ),
+            height: Math.max(
+                0,
+                bounds.height - padding.top - padding.bottom
+            )
+        };
+
+        this.layout?.arrange(this, contentBounds, context);
+    }
+    drawContent(renderer) {
+    //implemented in children
+    }
+    hitTest(x, y) {
+        if (!this.visible || !this.enabled) return null;
+
+        // reversed to ensure top elements are chosen first
+        for (let i = this.children.length - 1; i >= 0; i--) {
+            const hit = this.children[i].hitTest(x, y);
+
+            if (hit) return hit;
+        }
+
+        const b = this.bounds;
+
+        if (
+            x >= b.x && x <= b.x + b.width &&
+            y >= b.y && y <= b.y + b.height
+        ) {
+            return this;
+        }
+
+        return null;
+    }
+}
+class UILayout {
+    measure(container, available, context) {
+        throw new Error("layout measure() must be implemented.");
+    }
+
+    arrange(container, contentBounds, context) {
+        throw new Error("layout arrange() must be implemented.");
+    }
+}
+class UIStackLayout {
+    constructor({
+        direction = "column",
+        gap = 8,
+        align = "stretch",
+        justify = "start"
+    } = {}) {
+        this.direction = direction;
+        this.gap = gap;
+        this.align = align;
+        this.justify = justify;
+    }
+
+    measure(container, available, context) {
+        const vertical = this.direction === "column";
+
+        const children = container.children.filter(
+            child => child.visible
+        );
+
+        const inner = container.getInnerAvailable(available);
+
+        let main = 0;
+        let cross = 0;
+
+        for (const child of children) {
+            
+            const size = child.measure(inner, context);
+
+            main += vertical ? size.height : size.width;
+            cross = Math.max(
+                cross,
+                vertical ? size.width : size.height
+            );
+        }
+
+        if (children.length > 1) {
+            main += this.gap * (children.length - 1);
+        }
+
+        return vertical
+            ? { width: cross, height: main }
+            : { width: main, height: cross };
+    }
+
+    arrange(container, content, context) {
+        const vertical = this.direction === "column";
+
+        const children = container.children.filter(
+            child => child.visible
+        );
+
+        if (children.length === 0) return;
+
+        const mainAvailable = vertical
+            ? content.height
+            : content.width;
+
+        const crossAvailable = vertical
+            ? content.width
+            : content.height;
+
+        const sizes = children.map(child =>
+            child.measure(content, context)
+        );
+
+ 
+        let fixedMain = 0;
+        let totalFill = 0;
+
+        for (let i = 0; i < children.length; i++) {
+            const child = children[i];
+            const spec = vertical ? child.height : child.width;
+            const measured = vertical
+                ? sizes[i].height
+                : sizes[i].width;
+
+            if (spec.type === "fill") {
+                totalFill += spec.weight ?? 1;
+            } else {
+                fixedMain += measured;
+            }
+        }
+
+        const gaps = this.gap * (children.length - 1);
+        const remaining = Math.max(
+            0,
+            mainAvailable - fixedMain - gaps
+        );
+
+        let usedMain = fixedMain + gaps;
+
+        if (totalFill > 0) {
+            usedMain += remaining;
+        }
+
+        let cursor = 0;
+
+        if (this.justify === "center") {
+            cursor = (mainAvailable - usedMain) / 2;
+        } else if (this.justify === "end") {
+            cursor = mainAvailable - usedMain;
+        } else if (this.justify === "space-between" &&
+                   children.length > 1) {
+           
+        }
+
+        const extraGap = this.justify === "space-between" &&
+                         children.length > 1
+            ? Math.max(0, mainAvailable - usedMain) /
+              (children.length - 1)
+            : 0;
+
+        for (let i = 0; i < children.length; i++) {
+            const child = children[i];
+            const measured = sizes[i];
+
+            const mainSpec = vertical ? child.height : child.width;
+            const crossSpec = vertical ? child.width : child.height;
+
+            const naturalMain = vertical
+                ? measured.height
+                : measured.width;
+
+            const naturalCross = vertical
+                ? measured.width
+                : measured.height;
+
+            const childMain = mainSpec.type === "fill"
+                ? remaining * ((mainSpec.weight ?? 1) / totalFill)
+                : naturalMain;
+
+            let childCross = naturalCross;
+
+if (this.align === "stretch") {
+    childCross = crossAvailable;
+} else if (crossSpec.type === "fill") {
+    childCross = crossAvailable;
+}
+            
+            let crossOffset = 0;
+
+            if (this.align === "center") {
+                crossOffset = (crossAvailable - childCross) / 2;
+            } else if (this.align === "end") {
+                crossOffset = crossAvailable - childCross;
+            }
+
+            child.arrange(
+                vertical
+                    ? {
+                        x: content.x + crossOffset,
+                        y: content.y + cursor,
+                        width: childCross,
+                        height: childMain
+                    }
+                    : {
+                        x: content.x + cursor,
+                        y: content.y + crossOffset,
+                        width: childMain,
+                        height: childCross
+                    },
+                context
+            );
+
+            cursor += childMain + this.gap + extraGap;
+        }
+    }
+}
+class UIPanel extends UIElement {
+    constructor({ layout = null, ...options } = {}) {
+        super(options);
+        this.layout = layout;
+    }
+
+    measureContent(available, context) {
+
+        if (!this.layout) {
+            return { width: 0, height: 0 };
+        }
+
+        return this.layout.measure(this, available, context);
+    }
+    getInnerAvailable(available) {
+    const p = this.getPadding();
+
+    return {
+        width: Math.max(
+            0,
+            available.width - p.left - p.right
+        ),
+        height: Math.max(
+            0,
+            available.height - p.top - p.bottom
+        )
+    };
+}
+}
+class UIStack extends UIPanel {
+    constructor({
+        direction = "column",
+        gap = 8,
+        align = "stretch",
+        justify = "start",
+        ...options
+    } = {}) {
+        super({
+            ...options,
+            layout: new UIStackLayout({
+                direction,
+                gap,
+                align,
+                justify
+            })
+        });
+    }
+}
+class UILabel extends UIElement {
+    constructor({
+        text = "",
+        font = "body",
+        textAlign = "left",
+        ...options
+    } = {}) {
+        super(options);
+
+        this.text = text;
+        this.font = font;
+        this.textAlign = textAlign;
+    }
+    drawContent(renderer) {
+        
+    renderer.drawText(
+        this.text,
+        this.bounds,
+        {
+            font: this.font,
+            textAlign: this.textAlign,
+            color: this.style.color ?? "text",
+            padding: this.style.textPadding ?? 0
+        }
+    );
+}
+    measureContent(available, context) {
+
+    const ctx = context.ctx;
+
+    ctx.save();
+
+    ctx.font =
+        this.theme?.fonts?.[this.font] ??
+        this.font;
+
+    const metrics = ctx.measureText(this.text);
+
+    const width = metrics.width;
+    const height =
+        metrics.actualBoundingBoxAscent +
+        metrics.actualBoundingBoxDescent;
+
+    ctx.restore();
+
+    return { width, height };
+}
+}
+class UIRenderer {
+      constructor(context, theme) {
+        this.ctx = context;
+        this.theme = theme;
+    }
+//where da magic happens
+    drawTree(element) {
+        if (!element.visible) return;
+
+        const ctx = this.ctx;
+        const style =
+    element.getDrawStyle?.(this.theme) ??
+    element.style ??
+    {};
+        const bounds = element.bounds;
+
+        ctx.save();
+
+        ctx.globalAlpha *= style.opacity ?? 1;
+
+        this.drawBackground(bounds, style);
+
+        //Calls the draw for the given element (no for loop cause you're bout to see recursion)
+        element.drawContent?.(this);
+
+        //Clip children option
+        if (style.clipChildren) {
+            ctx.beginPath();
+            ctx.rect(
+                bounds.x,
+                bounds.y,
+                bounds.width,
+                bounds.height
+            );
+            ctx.clip();
+        }
+        //later children appear on top of earlier ones
+        for (const child of element.children) {
+            this.drawTree(child);
+        }
+
+        //save and restore is slow but what can ya do
+        ctx.restore();
+    }
+
+    drawBackground(bounds, style = {}) {
+        const ctx = this.ctx;
+        const {
+            x, y, width, height
+        } = bounds;
+
+        const radius = style.radius ?? 0;
+
+        //Background, with image support soon
+        if (style.background) {
+            ctx.fillStyle = this.resolveColor(style.background);
+
+            this.drawShape(x, y, width, height, radius);
+            ctx.fill();
+        }
+
+        //border, won't be used for most of the elements but good for when I haven't drawn everything yet so it still looks half decent.
+        if (style.borderColor && (style.borderWidth ?? 1) > 0) {
+            const borderWidth = style.borderWidth ?? 1;
+
+            ctx.strokeStyle = this.resolveColor(style.borderColor);
+            ctx.lineWidth = borderWidth;
+
+            //inset border so it remains inside the bounds.
+            const inset = borderWidth / 2;
+
+            this.drawShape(
+                x + inset,
+                y + inset,
+                Math.max(0, width - borderWidth),
+                Math.max(0, height - borderWidth),
+                Math.max(0, radius - inset)
+            );
+
+            ctx.stroke();
+        }
+    }
+
+    drawShape(x, y, width, height, radius = 0) {
+        const ctx = this.ctx;
+
+        if (radius <= 0) {
+            ctx.beginPath();
+            ctx.rect(x, y, width, height);
+            return;
+        }
+
+        const r = Math.min(radius, width / 2, height / 2);
+
+        ctx.beginPath();
+        ctx.roundRect(x, y, width, height, r);
+    }
+
+    resolveColor(value) {
+        //References to colors defined in the theme work as well as actual hex and rgb colors
+        return this.theme.colors[value] ?? value;
+    }
+
+    drawText(text, bounds, style = {}) {
+        if (text == null || text === "") return;
+
+        const ctx = this.ctx;
+
+        const font =
+    this.theme.fonts[style.font] ??
+    style.font ??
+    this.theme.fonts.body ??
+    "16px sans-serif";
+
+ctx.font = font;
+        ctx.fillStyle = this.resolveColor(
+            style.color ?? "text"
+        );
+
+        ctx.textAlign = style.textAlign ?? "left";
+        ctx.textBaseline = style.textBaseline ?? "middle";
+
+        const padding = style.padding ?? 0;
+
+        let x = bounds.x + padding;
+        if (ctx.textAlign === "center") {
+            x = bounds.x + bounds.width / 2;
+        } else if (ctx.textAlign === "right" ||
+                   ctx.textAlign === "end") {
+            x = bounds.x + bounds.width - padding;
+        }
+
+        const y = bounds.y + bounds.height / 2;
+
+        ctx.fillText(
+            String(text),
+            x,
+            y,
+            style.maxWidth ?? Math.max(0, bounds.width - padding * 2)
+        );
+    }
+}
+class UIButton extends UILabel {
+    constructor({
+        onActivate = null,
+        ...options
+    } = {}) {
+        super(options);
+
+        this.onActivate = onActivate;
+
+        this.hovered = false;
+        this.pressed = false;
+    }
+
+    activate() {
+        if (!this.enabled) return;
+
+        this.onActivate?.(this);
+    }
+
+    getDrawStyle() {
+        return {
+            ...this.style,
+
+            background: this.pressed
+                ? (this.style.pressedBackground ?? "buttonPressed")
+                : this.hovered
+                    ? (this.style.hoverBackground ?? "buttonHover")
+                    : (this.style.background ?? "button")
+        };
+    }
+}
+const defaultUITheme = {
+    colors: {
+        background: "rgb(0,0,0)",
+        panel: "rgb(30,40,50,0.2)",
+        border: "#606579",
+        text: "#f1eee8",
+        muted: "#aaaab7",
+        button: "#343747",
+        buttonHover: "#484c61",
+        buttonPressed: "#252735"
+    },
+
+    fonts: {
+        title: '36px "Gravitas One"',
+        body: '26px "Grape Nuts"',
+        small: '12px "Grape Nuts"'
+    },
+
+    borders: {
+        panel: 1,
+        button: 1
+    }
+};
+class UIManager {
+    constructor(canvas, theme = defaultUITheme) {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext("2d");
+
+        this.theme = theme;
+        this.renderer = new UIRenderer(this.ctx, theme);
+
+        this.screenStack = [];
+        this.focusedElement = null;
+
+        this.blocksGameInput = false;
+
+        this.hoveredButton = null;
+        this.pressedButton = null;
+    }
+
+    get activeScreen() {
+        return this.screenStack.at(-1) ?? null;
+    }
+
+    setScreen(screen) {
+    while (this.screenStack.length > 0) {
+        const old = this.screenStack.pop();
+        old.onExit?.(this);
+    }
+
+    this.clearPointerState();
+    this.pushScreen(screen);
+}
+
+pushScreen(screen) {
+    if (!(screen instanceof UIElement)) {
+        throw new TypeError("Screen must be a UIElement.");
+    }
+
+    this.activeScreen?.onSuspend?.(this);
+
+    this.screenStack.push(screen);
+    screen.onEnter?.(this);
+
+    this.blocksGameInput = true;
+}
+
+popScreen() {
+    if (this.screenStack.length === 0) return null;
+
+    const old = this.screenStack.pop();
+
+    this.clearPointerState();
+    old.onExit?.(this);
+
+    this.activeScreen?.onResume?.(this);
+    this.blocksGameInput = this.screenStack.length > 0;
+
+    return old;
+}
+
+clearPointerState() {
+    if (this.hoveredButton) {
+        this.hoveredButton.hovered = false;
+    }
+
+    if (this.pressedButton) {
+        this.pressedButton.pressed = false;
+    }
+
+    this.hoveredButton = null;
+    this.pressedButton = null;
+}
+    findButtonAt(x, y) {
+    let element = this.activeScreen?.hitTest(x, y) ?? null;
+
+    //make sure a child of a button traces to the button ancestor
+    while (element) {
+        if (element instanceof UIButton) {
+            return element;
+        }
+
+        element = element.parent;
+    }
+
+    return null;
+}
+
+handlePointerMove(x, y) {
+    const button = this.findButtonAt(x, y);
+
+    if (this.hoveredButton !== button) {
+        if (this.hoveredButton) {
+            this.hoveredButton.hovered = false;
+        }
+
+        this.hoveredButton = button;
+
+        if (button) {
+            button.hovered = true;
+        }
+    }
+
+    if (this.pressedButton) {
+        this.pressedButton.pressed =
+            this.pressedButton === button;
+    }
+}
+
+handlePointerDown(x, y, buttonIndex = 0) {
+    if (buttonIndex !== 0) return;
+
+    this.handlePointerMove(x, y);
+
+    this.pressedButton = this.hoveredButton;
+
+    if (this.pressedButton) {
+        this.pressedButton.pressed = true;
+    }
+}
+
+handlePointerUp(x, y, buttonIndex = 0) {
+    if (buttonIndex !== 0) return;
+
+    this.handlePointerMove(x, y);
+
+    const pressed = this.pressedButton;
+    const releasedOn = this.hoveredButton;
+
+    this.pressedButton = null;
+
+    if (pressed) {
+        pressed.pressed = false;
+    }
+
+    //Activate when released but it has to be on the same button
+    if (pressed && pressed === releasedOn) {
+        pressed.activate();
+    }
+}
+
+    update() {
+      //Could be useful
+    }
+
+    render() {
+        const screen = this.activeScreen;
+
+        if (!screen) return;
+
+        const available = {
+            width: this.canvas.width,
+            height: this.canvas.height
+        };
+
+    
+        screen.measure(available, { ctx: this.ctx });
+        screen.arrange({
+            x: 0,
+            y: 0,
+            width: available.width,
+            height: available.height
+        },{ctx:this.ctx});
+
+        this.ctx.clearRect(
+            0, 0,
+            this.canvas.width,
+            this.canvas.height
+        );
+
+        this.renderer.drawTree(screen);
+    }
+
+}
 const GFXUtils = {
     createMissingTex() {
         let noTexTex = new OffscreenCanvas(256, 256);
@@ -810,290 +1689,6 @@ let entityAtlasNormal = new TextureAtlas([{
         name: "rustySword"
     },
 ]);
-
-class TileSet {
-    constructor() {
-        this.tiles = {};
-    }
-    define(char, dat) {
-        this.tiles[char] = dat;
-        return this;
-    }
-    get(char) {
-        return this.tiles[char];
-    }
-}
-class Level {
-    static tileSize = 64; 
-
-    constructor(name, slices, colliders = {}) {
-        this.name = name;
-        this.slices = slices;
-        this.slices = this.slices.sort((a, b) => b.z - a.z);
-        this.zones = colliders;
-        this.ground = this.slices.find((s) => s.z == 1);
-        this.colliders = this.ground.colliders;
-    }
-    get(x, y, z) {
-        return this.slices[z].data[y][x];
-    }
-    get width() {
-        return this.ground.data[0].length;
-    }
-    get height() {
-        return this.ground.data.length;
-    }
-    pointCollision(x, y) {
-        const s = this.ground;
-        const tx = Math.floor(x / (Level.tileSize * 0.5) - s.x);
-        const ty = Math.floor(y / (Level.tileSize * 0.5) - s.y);
-        if (tx < 0 || ty < 0 || ty >= s.data.length || tx >= s.data[0].length) {
-            return null;
-        }
-        const tile = s.data[s.data.length - ty - 1][tx];
-        return this.colliders[tile] ?? null;
-    }
-    rectCollision(box) {
-        const s = this.ground;
-        const tile = Level.tileSize * 0.5;
-
-        const tx0 = Math.floor(box.x / tile - s.x);
-        const ty0 = Math.floor(box.y / tile - s.y);
-
-        const tx1 = Math.floor((box.x + box.w - 0.001) / tile - s.x);
-        const ty1 = Math.floor((box.y + box.h - 0.001) / tile - s.y);
-
-        for (let ty = ty0; ty <= ty1; ty++) {
-            if (ty < 0 || ty >= s.data.length) continue;
-
-            for (let tx = tx0; tx <= tx1; tx++) {
-                if (tx < 0 || tx >= s.data[0].length) continue;
-
-                const tileId = s.data[s.data.length - ty - 1][tx];
-                const collider = this.colliders[tileId];
-
-                if (collider) {
-                    return collider;
-                }
-            }
-        }
-
-        return null;
-    }
-    raycast(ox, oy, dx, dy) {
-        const s = this.ground;
-
-        let tx = Math.floor(ox / Level.tileSize - s.x);
-        let ty = Math.floor(oy / Level.tileSize - s.y);
-
-        const stepX = Math.sign(dx);
-        const stepY = Math.sign(dy);
-
-        const deltaX = dx !== 0 ? Math.abs(Level.tileSize / dx) : Infinity;
-        const deltaY = dy !== 0 ? Math.abs(Level.tileSize / dy) : Infinity;
-
-        let sideX, sideY;
-
-        const side = (p, t, d, o) => d ? (((t + (d > 0) + o) * Level.tileSize) - p) / d : Infinity;
-
-        sideX = side(ox, tx, dx, s.x);
-        sideY = side(oy, ty, dy, s.y);
-        let nx = 0;
-        let ny = 0;
-        let lt = 0;
-        for (var i = 0; i < 1000; i++) {
-            if (tx < 0 || ty < 0 || ty >= s.data.length || tx >= s.data[0].length) {
-                return null;
-            }
-
-            const tile = s.data[s.data.length - ty - 1][tx];
-
-            const collider = this.colliders[tile];
-            let t = Math.min(sideX, sideY);
-            if (collider) {
-                return {
-                    tile,
-                    collider,
-                    x: ox + dx * lt,
-                    y: oy + dy * lt,
-                    distance: lt,
-                    normal: {
-                        x: nx,
-                        y: ny
-                    },
-                };
-            }
-            lt = t;
-            if (sideX < sideY) {
-                sideX += deltaX;
-                tx += stepX;
-                nx = -stepX;
-                ny = 0;
-            } else {
-                sideY += deltaY;
-                ty += stepY;
-                nx = 0;
-                ny = -stepY;
-            }
-        }
-    }
-    buildMesh(tileSet) {
-        const vb = [];
-        const ub = [];
-        for (let z = 0; z < this.slices.length; z++) {
-            const slice = this.slices[z];
-            for (let y = 0; y < slice.data.length; y++) {
-                const row = slice.data[slice.data.length - y - 1];
-                for (let x = 0; x < row.length; x++) {
-                    const tile = tileSet.get(row[x]);
-                    if (!tile) {
-                        continue;
-                    }
-                    let x1 = (x + slice.x) * Level.tileSize * 0.5;
-                    let y1 = (y + slice.y) * Level.tileSize * 0.5;
-                    let z1 = slice.z;
-                    const u0 = tile.x;
-                    const v0 = tile.y;
-                    const u1 = u0 + tile.w;
-                    const v1 = v0 + tile.h;
-                    vb.push(x1, y1, z1, x1 + tile.w * 0.5, y1, z1, x1, y1 + tile.h * 0.5, z1, x1 + tile.w * 0.5, y1, z1, x1 + tile.w * 0.5, y1 + tile.h * 0.5, z1, x1, y1 + tile.h * 0.5, z1, );
-                    ub.push(u0, v1, z1, u1, v1, z1, u0, v0, z1, u1, v1, z1, u1, v0, z1, u0, v0, z1, );
-                }
-            }
-        }
-        return {
-            coordinates: new Float32Array(vb),
-
-            uv: new Float32Array(ub),
-        };
-    }
-}
-//Muahahahhahaa formatting.  Looks stupid but works cause js doesn't care what you do apparently.
-const tiles = new TileSet()
-    .define("a", { x: 64, y: 64, w: 64, h: 64 })
-    .define("b", { x: 128, y: 64, w: 64, h: 64 })
-    .define("c", { x: 128, y: 0, w: 64, h: 64 })
-    .define("d", { x: 64, y: 0, w: 64, h: 64 })
-    .define("e", { x: 0, y: 0, w: 64, h: 64 })
-    .define("f", { x: 0, y: 64, w: 64, h: 64 })
-    .define("g", { x: 0, y: 128, w: 64, h: 64 })
-    .define("h", { x: 64, y: 128, w: 64, h: 64 })
-    .define("i", { x: 128, y: 128, w: 64, h: 64 })
-    .define("j", { x: 128 + 64, y: 0, w: 64, h: 64 })
-    .define("k", { x: 128 + 64, y: 64, w: 64, h: 64 })
-    .define("l", { x: 256, y: 0, w: 64, h: 64 })
-    .define("m", { x: 256, y: 64, w: 64, h: 64 })
-    .define("n", { x: 256, y: 128, w: 64, h: 64 })
-
-const levelData = [{
-        x: 0,
-        y: 0,
-        z: 0.5,
-        data: [
-            "           l       l       a l      ",
-            "           m       m       h m      ",
-            "           m       m         m      ",
-            "           m       m         m      ",
-            "           m    h  m         m      ",
-            "           n    a  n         n      ",
-        ],
-    },
-    {
-        x: 0,
-        y: 0,
-        z: 1,
-        data: [
-            "hi  ghhhhhhhhhhhhhhhhhhhhhhhhhhhhhha",
-            "b         faab                     f",
-            "b         ghhi                     g",
-            "b                                   ",
-            "b                                   ",
-            "adddddddddddddadddaadddaadddddadaadd",
-        ],
-        colliders: {
-            a: true,
-            b: true,
-            c: true,
-            d: true,
-            e: true,
-            f: true,
-            g: true,
-            h: true,
-            i: true, 
-        },
-    },
-
-    {
-        x: 0,
-        y: -1,
-        z: 1.5,
-        data: [
-            " l      l      l        l        l  ",
-            " m      m      m  ha    m  h     m f",
-            " m      m      m   h    m        m f",
-            " m      m      m        m        m  ",
-            " m      m      m        m        m  ",
-            " m      m      m        m        m  ",
-            " m      m      m  d     m    ec  m  ",
-            " n      n      n        n        n  ",
-        ],
-    },
-    {
-        x: 0,
-        y: -1,
-        z: 0.75,
-        data: [
-            "                                     ",
-            "                        j            ",
-            "                        k            ",
-            "                                     ",
-            "                                     ",
-            "                                     ",
-            "                                     ",
-            "                                     ",
-        ],
-    },
-    {
-        x: 0,
-        y: -1,
-        z: 1.25,
-        data: [
-            "                                    ",
-            "     j          j               j   ",
-            "     k          k               k   ",
-            "                                    ",
-            "                                    ",
-            "                                    ",
-            "                                    ",
-            "                                    ",
-        ],
-    },
-    {
-        x: -4,
-        y: -1,
-        z: 2,
-        data: [
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaahaaaaaaa",
-            "aaaaaaaaaaaahaaaaaaahaaaaaaaaaabfaahaaaaaaaa",
-            "aaaabfaaaaaadaaaaaaadaabfaaaaaaaaaaaaaaaaaaa",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaahaa",
-            "aaahaaabfaahaabfaahaaaaaahaaaabfaaaaaadaaaaa",
-            "aaadaaaaaaadaaaaaadaabfaadaaaaaahaaaaahaaaaa",
-            "aaaaaaaaaaaaaaahaaaaahaaaaaaaaabfaaaaaadaaaa",
-            "aaaaaaabfaaaaaadaaaaadaaabfaaaaaaaahaaaaaaaa",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaadaabfaaaaaaaa",
-        ],
-    },
-];
-
-const level = new Level("test room", levelData, {
-    lights: new Float32Array([527, 147, 1.25, 526 + 256, 147, 0.75, 526 + 512, 147, 1.25])
-});
-
-const meshData = level.buildMesh(tiles);
-
-worldMesh.setAttribute("coordinates", meshData.coordinates);
-worldMesh.setAttribute("uv", meshData.uv);
 
 const PhysUtils = {
     solveConstraint(ts, x, y, a, b = null) {
@@ -1676,13 +2271,15 @@ class Humanoid extends Entity {
                 this.ends.push(i);
             }
         }
-
+        this.hand={x:0,y:0}
+        this.tilt=0;
         this.pickInitFunction("arm")(this, 6);
         this.pickInitFunction("arm")(this, 7);
         this.pickInitFunction("leg")(this, 12);
         this.pickInitFunction("leg")(this, 13);
         this.hitbox.hh = this.hitbox.h;
         this.tic = 0;
+        
     }
     displayHitbox() {
         let hb = this.hitbox;
@@ -1704,10 +2301,13 @@ class Humanoid extends Entity {
         }
         this.hitbox.xv *= this.hitbox.onGround ? 0.92 : 0.98;
         this.hitbox.yv *= 0.99;
+        this.hitbox.xv+=this.tilt*0.02;
         this.nodes[0].x = this.hitbox.cx * 2;
         this.nodes[0].y = (this.hitbox.y + this.hitbox.hh * 0.5) * 2 - 2;
-        this.nodes[1].x = this.hitbox.cx * 2 + this.hitbox.xv;
+        this.nodes[1].x = this.hitbox.cx * 2 + this.tilt+this.hitbox.xv;
         this.nodes[1].y = (this.hitbox.y + this.hitbox.hh * 0.5) * 2 + 10;
+
+         
     }
     static updateFunctions = {
         normalMovement: {
@@ -1727,10 +2327,10 @@ class Humanoid extends Entity {
                 if(ind==6){
                     PhysUtils.springPhys(
                     curNode,
-                    thi.hitbox.cx*2+(input.rs.x*50+5),
-                    thi.hitbox.cy*2+(input.rs.y*75-9),
+                    thi.hitbox.cx*2+(thi.hand.x*50+5),
+                    thi.hitbox.cy*2+(thi.hand.y*75-9),
                     0.1, 
-                    0.8,
+                    0.82,
                 );  
                 }else{
                     PhysUtils.springPhys(
@@ -1803,10 +2403,10 @@ class Humanoid extends Entity {
         }
             */
         if (Math.abs(move) > 1.1) {
-            this.targetFacing = Math.sign(move);
+        //    this.targetFacing = Math.sign(move);
         }
         if (Math.abs(aim) > 0.8) {
-            this.targetFacing = Math.sign(aim);
+      //      this.targetFacing = Math.sign(aim);
             this.facing += (this.targetFacing - this.facing) * 0.08;
         } 
         this.facing += (this.targetFacing - this.facing) * 0.03;
@@ -1859,6 +2459,232 @@ class Humanoid extends Entity {
 
     }
 }
+class PlayerAttack {
+    static bigrams = {
+            NN: { x: 0, y: 90, tilt: 0,mult:0.7},
+            NE: { x: 75, y: -5, tilt: -4,mult:1.7},
+            NW: { x: -55, y: 45, tilt: 7,mult:1.2},
+            NS: { x: -35, y: -75, tilt: -4,mult:1},
+
+            EE: { x: 90, y: 5, tilt: 9,mult:2.1},
+            EN: { x: 55, y: 50, tilt: -4,mult:0.5},
+            ES: { x: 55, y: -45, tilt: -8,mult:1.0},
+            EW: { x: -90, y: -20, tilt: 4,mult:0.9},
+
+            SS: { x: 0, y: -70, tilt: 6,mult:0.6},
+            SE: { x: 45, y: -45, tilt: -8,mult:0.7},
+            SW: { x: -45, y: -45, tilt: 8,mult:1.1},
+            SN: { x: 25, y: 85, tilt: 8,mult:0.4},
+
+            WW: { x: -70, y: 0, tilt: -9,mult:1.8},
+            WN: { x: 28, y: 60, tilt: 6,mult:0.8},
+            WS: { x: -55, y: -45, tilt: 8,mult:1.6},
+            WE: { x: 90, y: 0, tilt: 10,mult:2.3}
+        };
+        static attackPatterns={
+            thrust:{
+                bigrams:["WE"],
+                damageMult:1.2,
+                defenceMult:0.7
+            },
+            backstepThrust:{
+                bigrams:["WW","WE"],
+                damageMult:2.1,
+                defenceMult:1.0
+            },
+            chargedThrust1:{
+                bigrams:["SW","WW","WE"],
+                damageMult:1.6,
+                defenceMult:0.9
+            },
+            chargedThrust2:{
+                bigrams:["SW","WW","WW","WE"],
+                damageMult:1.9,
+                defenceMult:0.7
+            },
+            overheadChop:{
+                bigrams:["NE"],
+                damageMult:1.1,
+                defenceMult:1.0
+            },
+            fullChop:{
+                bigrams:["WN","NE"],
+                damageMult:1.4,
+                defenceMult:1.1
+            },
+            circularChop:{
+                bigrams:["SS","SW","WN","NE"],
+                damageMult:2.0,
+                defenceMult:0.6
+            },
+            backstep:{
+                bigrams:["WW"],
+                damageMult:0.4,
+                defenceMult:1.6
+            },
+            parry:{
+                bigrams:["WW","WN"],
+                damageMult:0.1,
+                defenceMult:2.6
+            },
+        };
+    constructor(player) {
+        this.player = player;
+
+       
+
+        this.inputs = [];
+
+        this.direction = null;
+
+        this.phase = 0;
+        this.wait=0;
+        this.speed = 0.08;
+
+        this.hand = { xv: 0, yv: 0 };
+        this.tilt = 0;
+        this.canAttack=true;
+        this.damageMult = 1;
+        this.defenceMult = 1;
+    }
+
+  
+
+    addInput(direction) {
+
+        this.inputs.push(direction);
+
+  
+        if (this.direction === null) {
+            this.direction = direction;
+        }
+        
+    const bigrams = [];
+
+    for (let i = 0; i < this.inputs.length - 1; i++) {
+        bigrams.push([
+            this.inputs[i],
+            this.inputs[i + 1]
+        ]);
+    }
+
+    //Longest pattern gets priority, stacking still possible though
+    for (let length = 5; length >= 1; length--) {
+        if (bigrams.length < length) continue;
+
+        const recent = bigrams.slice(-length);
+
+        for (const [name, pattern] of Object.entries(PlayerAttack.attackPatterns)) {
+            if (pattern.bigrams.length !== length) continue;
+
+            let matches = true;
+
+            for (let i = 0; i < length; i++) {
+                if (
+                    recent[i][0] !== pattern.bigrams[i][0] ||
+                    recent[i][1] !== pattern.bigrams[i][1]
+                ) {
+                    matches = false;
+                    break;
+                }
+            }
+
+            if (matches) {
+               
+                this.damageMult *= pattern.damageMult ?? 1;
+                this.defenceMult *= pattern.defenceMult ?? 1;
+                
+                this.damageMult=Math.max(this.damageMult,10);
+                console.log(this.defenceMult)
+                return name;
+            }
+        }
+    }
+
+    return null;
+    }
+
+    update() {
+        
+
+        const pose = this.getPose(this.phase);
+
+        
+        if (pose) {
+            this.phase += this.speed*(pose.mult*0.5+0.5);
+            this.hand.xv += (pose.x/100-this.player.hand.x)*0.1;
+            this.hand.yv += (pose.y/100-this.player.hand.y)*0.1;
+            this.hand.xv*=0.7;
+            this.hand.yv*=0.7;
+            this.player.hand.x+=this.hand.xv;
+            this.player.hand.y+=this.hand.yv;
+            this.player.tilt += (pose.tilt-this.player.tilt)*0.14;
+        }else{
+            this.hand.xv += (-this.player.hand.x)*0.1;
+            this.hand.yv += (-this.player.hand.y)*0.1;
+            this.hand.xv*=0.7;
+            this.hand.yv*=0.7;
+          this.player.tilt *= 0.9;
+        }
+        this.player.hand.x+=this.hand.xv;
+            this.player.hand.y+=this.hand.yv;
+        if ((this.phase >= this.inputs.length&&this.inputs.length!=0)||this.inputs.length>10) {
+            //console.log(this.wait)
+            if(this.wait<18){
+            this.wait++;
+            }else{
+            this.finish();
+            }
+        }
+        if(this.canAttack){
+            for(var i of input.mrc){
+            this.addInput(i);
+            if(this.inputs.length<=10){
+                this.wait=0;
+            }
+        } 
+        }
+    }
+
+    finish() {
+        this.inputs.length = 0;
+        this.phase = 0;
+        this.wait=0;
+        this.damageMult=1;
+        this.defenceMult=1;
+    }
+
+    getPose(phase) {
+        if (this.inputs.length < 1)
+            return null;
+        if(this.inputs.length==1){
+             const key = this.inputs[0] + this.inputs[0];
+            const pose = PlayerAttack.bigrams[key];
+            return pose;
+        }
+        const poses = [];
+
+        for (let i = 0; i < this.inputs.length - 1; i++) {
+            const key = this.inputs[i] + this.inputs[i + 1];
+            const pose = PlayerAttack.bigrams[key];
+
+            if (pose)
+                poses.push(pose);
+        }
+
+       
+
+        const index = Math.floor(this.phase);
+        if(index>=poses.length){
+return poses[index-1];
+       }
+        const t = this.phase - index;
+
+        const a = poses[index];
+        return a
+    }
+}
+
 class ArachnidBoss extends Entity {
     constructor(x, y, z, name) {
         let previewNodes = [
@@ -2113,6 +2939,310 @@ class Particle {
         }
     };
 }
+class Inventory{
+    constructor(size){
+        this.items=new Array(size);
+        this.items.fill(null);
+    }
+}
+class Item {
+    constructor(name,num=1){
+        this.name=name;
+        this.inInventory=false;
+    }
+    pickup(inv){
+        let chk=inv.items.indexOf(null);
+        if(chk){
+            inv.items[chk]=this;
+            this.inInventory=true;
+        }
+    } 
+}
+
+class TileSet {
+    constructor() {
+        this.tiles = {};
+    }
+    define(char, dat) {
+        this.tiles[char] = dat;
+        return this;
+    }
+    get(char) {
+        return this.tiles[char];
+    }
+}
+class Level {
+    static tileSize = 64; 
+
+    constructor(name, slices, colliders = {}) {
+        this.name = name;
+        this.slices = slices;
+        this.slices = this.slices.sort((a, b) => b.z - a.z);
+        this.zones = colliders;
+        this.ground = this.slices.find((s) => s.z == 1);
+        this.colliders = this.ground.colliders;
+    }
+    get(x, y, z) {
+        return this.slices[z].data[y][x];
+    }
+    get width() {
+        return this.ground.data[0].length;
+    }
+    get height() {
+        return this.ground.data.length;
+    }
+    pointCollision(x, y) {
+        const s = this.ground;
+        const tx = Math.floor(x / (Level.tileSize * 0.5) - s.x);
+        const ty = Math.floor(y / (Level.tileSize * 0.5) - s.y);
+        if (tx < 0 || ty < 0 || ty >= s.data.length || tx >= s.data[0].length) {
+            return null;
+        }
+        const tile = s.data[s.data.length - ty - 1][tx];
+        return this.colliders[tile] ?? null;
+    }
+    rectCollision(box) {
+        const s = this.ground;
+        const tile = Level.tileSize * 0.5;
+
+        const tx0 = Math.floor(box.x / tile - s.x);
+        const ty0 = Math.floor(box.y / tile - s.y);
+
+        const tx1 = Math.floor((box.x + box.w - 0.001) / tile - s.x);
+        const ty1 = Math.floor((box.y + box.h - 0.001) / tile - s.y);
+
+        for (let ty = ty0; ty <= ty1; ty++) {
+            if (ty < 0 || ty >= s.data.length) continue;
+
+            for (let tx = tx0; tx <= tx1; tx++) {
+                if (tx < 0 || tx >= s.data[0].length) continue;
+
+                const tileId = s.data[s.data.length - ty - 1][tx];
+                const collider = this.colliders[tileId];
+
+                if (collider) {
+                    return collider;
+                }
+            }
+        }
+
+        return null;
+    }
+    raycast(ox, oy, dx, dy) {
+        const s = this.ground;
+
+        let tx = Math.floor(ox / Level.tileSize - s.x);
+        let ty = Math.floor(oy / Level.tileSize - s.y);
+
+        const stepX = Math.sign(dx);
+        const stepY = Math.sign(dy);
+
+        const deltaX = dx !== 0 ? Math.abs(Level.tileSize / dx) : Infinity;
+        const deltaY = dy !== 0 ? Math.abs(Level.tileSize / dy) : Infinity;
+
+        let sideX, sideY;
+
+        const side = (p, t, d, o) => d ? (((t + (d > 0) + o) * Level.tileSize) - p) / d : Infinity;
+
+        sideX = side(ox, tx, dx, s.x);
+        sideY = side(oy, ty, dy, s.y);
+        let nx = 0;
+        let ny = 0;
+        let lt = 0;
+        for (var i = 0; i < 1000; i++) {
+            if (tx < 0 || ty < 0 || ty >= s.data.length || tx >= s.data[0].length) {
+                return null;
+            }
+
+            const tile = s.data[s.data.length - ty - 1][tx];
+
+            const collider = this.colliders[tile];
+            let t = Math.min(sideX, sideY);
+            if (collider) {
+                return {
+                    tile,
+                    collider,
+                    x: ox + dx * lt,
+                    y: oy + dy * lt,
+                    distance: lt,
+                    normal: {
+                        x: nx,
+                        y: ny
+                    },
+                };
+            }
+            lt = t;
+            if (sideX < sideY) {
+                sideX += deltaX;
+                tx += stepX;
+                nx = -stepX;
+                ny = 0;
+            } else {
+                sideY += deltaY;
+                ty += stepY;
+                nx = 0;
+                ny = -stepY;
+            }
+        }
+    }
+    buildMesh(tileSet) {
+        const vb = [];
+        const ub = [];
+        for (let z = 0; z < this.slices.length; z++) {
+            const slice = this.slices[z];
+            for (let y = 0; y < slice.data.length; y++) {
+                const row = slice.data[slice.data.length - y - 1];
+                for (let x = 0; x < row.length; x++) {
+                    const tile = tileSet.get(row[x]);
+                    if (!tile) {
+                        continue;
+                    }
+                    let x1 = (x + slice.x) * Level.tileSize * 0.5;
+                    let y1 = (y + slice.y) * Level.tileSize * 0.5;
+                    let z1 = slice.z;
+                    const u0 = tile.x;
+                    const v0 = tile.y;
+                    const u1 = u0 + tile.w;
+                    const v1 = v0 + tile.h;
+                    vb.push(x1, y1, z1, x1 + tile.w * 0.5, y1, z1, x1, y1 + tile.h * 0.5, z1, x1 + tile.w * 0.5, y1, z1, x1 + tile.w * 0.5, y1 + tile.h * 0.5, z1, x1, y1 + tile.h * 0.5, z1, );
+                    ub.push(u0, v1, z1, u1, v1, z1, u0, v0, z1, u1, v1, z1, u1, v0, z1, u0, v0, z1, );
+                }
+            }
+        }
+        return {
+            coordinates: new Float32Array(vb),
+
+            uv: new Float32Array(ub),
+        };
+    }
+}
+//Muahahahhahaa formatting.  Looks stupid but works cause js doesn't care what you do apparently.
+const tiles = new TileSet()
+    .define("a", { x: 64, y: 64, w: 64, h: 64 })
+    .define("b", { x: 128, y: 64, w: 64, h: 64 })
+    .define("c", { x: 128, y: 0, w: 64, h: 64 })
+    .define("d", { x: 64, y: 0, w: 64, h: 64 })
+    .define("e", { x: 0, y: 0, w: 64, h: 64 })
+    .define("f", { x: 0, y: 64, w: 64, h: 64 })
+    .define("g", { x: 0, y: 128, w: 64, h: 64 })
+    .define("h", { x: 64, y: 128, w: 64, h: 64 })
+    .define("i", { x: 128, y: 128, w: 64, h: 64 })
+    .define("j", { x: 128 + 64, y: 0, w: 64, h: 64 })
+    .define("k", { x: 128 + 64, y: 64, w: 64, h: 64 })
+    .define("l", { x: 256, y: 0, w: 64, h: 64 })
+    .define("m", { x: 256, y: 64, w: 64, h: 64 })
+    .define("n", { x: 256, y: 128, w: 64, h: 64 })
+
+const levelData = [{
+        x: 0,
+        y: 0,
+        z: 0.5,
+        data: [
+            "           l       l       a l      ",
+            "           m       m       h m      ",
+            "           m       m         m      ",
+            "           m       m         m      ",
+            "           m    h  m         m      ",
+            "           n    a  n         n      ",
+        ],
+    },
+    {
+        x: 0,
+        y: 0,
+        z: 1,
+        data: [
+            "hi  ghhhhhhhhhhhhhhhhhhhhhhhhhhhhhha",
+            "b         faab                     f",
+            "b         ghhi                     g",
+            "b                                   ",
+            "b                                   ",
+            "adddddddddddddadddaadddaadddddadaadd",
+        ],
+        colliders: {
+            a: true,
+            b: true,
+            c: true,
+            d: true,
+            e: true,
+            f: true,
+            g: true,
+            h: true,
+            i: true, 
+        },
+    },
+
+    {
+        x: 0,
+        y: -1,
+        z: 1.5,
+        data: [
+            " l      l      l        l        l  ",
+            " m      m      m  ha    m  h     m f",
+            " m      m      m   h    m        m f",
+            " m      m      m        m        m  ",
+            " m      m      m        m        m  ",
+            " m      m      m        m        m  ",
+            " m      m      m  d     m    ec  m  ",
+            " n      n      n        n        n  ",
+        ],
+    },
+    {
+        x: 0,
+        y: -1,
+        z: 0.75,
+        data: [
+            "                                     ",
+            "                        j            ",
+            "                        k            ",
+            "                                     ",
+            "                                     ",
+            "                                     ",
+            "                                     ",
+            "                                     ",
+        ],
+    },
+    {
+        x: 0,
+        y: -1,
+        z: 1.25,
+        data: [
+            "                                    ",
+            "     j          j               j   ",
+            "     k          k               k   ",
+            "                                    ",
+            "                                    ",
+            "                                    ",
+            "                                    ",
+            "                                    ",
+        ],
+    },
+    {
+        x: -4,
+        y: -1,
+        z: 2,
+        data: [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaahaaaaaaa",
+            "aaaaaaaaaaaahaaaaaaahaaaaaaaaaabfaahaaaaaaaa",
+            "aaaabfaaaaaadaaaaaaadaabfaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaahaa",
+            "aaahaaabfaahaabfaahaaaaaahaaaabfaaaaaadaaaaa",
+            "aaadaaaaaaadaaaaaadaabfaadaaaaaahaaaaahaaaaa",
+            "aaaaaaaaaaaaaaahaaaaahaaaaaaaaabfaaaaaadaaaa",
+            "aaaaaaabfaaaaaadaaaaadaaabfaaaaaaaahaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaadaabfaaaaaaaa",
+        ],
+    },
+];
+
+const level = new Level("test room", levelData, {
+    lights: new Float32Array([527, 147, 1.25, 526 + 256, 147, 0.75, 526 + 512, 147, 1.25])
+});
+
+const meshData = level.buildMesh(tiles);
+
+worldMesh.setAttribute("coordinates", meshData.coordinates);
+worldMesh.setAttribute("uv", meshData.uv);
+
 class Camera {
     constructor(target = null) {
         this.x = 0;
@@ -2222,7 +3352,18 @@ for (var i = 0; i < 1; i++) {
 
 let Player = {};
 Player.entity = entityHandler.entities[0];
+Player.attack=new PlayerAttack(Player.entity);
 
+Player.update=function(){
+  if (input.up() && Player.entity.hitbox.onGround) {
+            Player.entity.hitbox.yv = 4.4;
+        }
+        
+            Player.entity.hitbox.xv += (Player.entity.hitbox.onGround ? 0.22 : 0.09)*input.ls.x;
+            
+        Player.attack.update();
+   
+}
 
 //(owner,node1,node2, x,y,w,h)
 Player.sword = new Weapon(Player.entity, 6, 4, 0, 1, 32, 64, "rustySword");
@@ -2242,6 +3383,66 @@ var player = {
     py: 1,
     pz: 0
 };
+
+
+const mainMenu = new UIStack({
+    width: UISize.percent(1),
+    height: UISize.fill(),
+    direction: "column",
+    gap: 24,
+    align: "stretch",
+    padding: 28,
+    style: {
+        background: "panel"
+    }
+}); 
+
+mainMenu.add(
+    new UILabel({
+        text: "Honest",
+        textAlign: "left",
+        font:"title"
+    }),
+    new UILabel({
+        text: "Banker",
+        textAlign: "left",
+        font:"title"
+    }),
+    new UILabel({
+        text: "",
+        textAlign: "left",
+        font:"title"
+    }),
+    new UIButton({
+        text: "Play",
+        textAlign: "left",
+        font: "body",
+        onActivate: () => startGame()
+    }),
+
+    new UIButton({
+        text: "Settings",
+        textAlign: "left",
+        font: "small",
+        onActivate: () => ui.pushScreen(settingsScreen)
+    })
+);
+
+const root = new UIStack({
+    width: UISize.fill(),
+    height: UISize.fill(),
+    direction: "column",
+    align: "center",
+    justify: "center"
+});
+
+root.add(mainMenu);
+
+const ui = new UIManager(c);
+ui.setScreen(root);
+ui.render();
+
+
 var frameCount = 0;
 var now;
 const frameTime = 1000 / 60;
@@ -2275,12 +3476,7 @@ function draw(now) {
         for (var i = 0; i < 1; i++) {
             entityHandler.entities[i + 1].hitbox.xv = Math.sin(i + frameCount * 0.02)
         }
-        if (input.up() && Player.entity.hitbox.onGround) {
-            Player.entity.hitbox.yv = 4.4;
-        }
-        
-            Player.entity.hitbox.xv += (Player.entity.hitbox.onGround ? 0.22 : 0.09)*input.ls.x;
-        
+        Player.update();
         //console.log(input.ls)
         glparticles.clear(); 
     
@@ -2344,11 +3540,11 @@ function draw(now) {
         ctx.fillRect(0, 0, 600, 600);
 
         ctx.drawImage(gfx.canvas, 0, 0, 640, 360);
-        
+        ui.render();
         ctx.fillStyle = "rgb(200,200,200)";
         ctx.font = "10px Jersey 10";
         ctx.fillText(Math.ceil(1000 / dt), 10, 10);
-        
+       
         input.updatePost()
         frameCount++;
         if (now > nextFrame + frameTime) {

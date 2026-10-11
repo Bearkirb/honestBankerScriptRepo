@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MIDI Parser</title>
+<style>
+    body {
+        font-family: system-ui, sans-serif;
+        margin: 0;
+        padding: 32px;
+      
+
+    }
+
+    #dropZone {
+        border: 2px solid #777;
+        border-radius: 12px;
+        padding: 60px 20px;
+        text-align: center; 
+        transition: 0.15s; 
+        cursor: pointer;
+    }
+
+    #output {
+        margin-top: 24px;
+        white-space: pre-wrap;
+        font-family: monospace;
+        border-radius: 8px;
+        padding: 16px;
+        overflow: auto;
+        max-height: 600px;
+    }
+
+    .error {
+        color: #ff7777;
+    }
+</style>
+</head>
+<body>
+
+<h1>MIDI Parser</h1>
+
+<div id="dropZone">
+    <strong>Drop a .mid or .midi file here</strong><br>
+    <span>or click to choose one</span>
+</div>
+
+<input id="fileInput" type="file" accept=".mid,.midi,audio/midi">
+
+<pre id="output">No MIDI loaded.</pre>
+<script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
+<script type="module">
+
+class MIDIParser {
+    constructor(buffer) {
+        this.data = new DataView(buffer);
+        this.offset = 0;
+        this.runningStatus = null;
+        this.header = null;
+        this.tracks = [];
+    }
+
+    readUint8() {
+        return this.data.getUint8(this.offset++);
+    }
+
+    readUint16() {
+        const value = this.data.getUint16(this.offset);
+        this.offset += 2;
+        return value;
+    }
+
+    readUint32() {
+        const value = this.data.getUint32(this.offset);
+        this.offset += 4;
+        return value;
+    }
+
+    readString(length) {
+        let result = "";
+        for (let i = 0; i < length; i++)
+            result += String.fromCharCode(this.readUint8());
+        return result;
+    }
+
+    readVariableLength() {
+        let value = 0;
+
+        while (true) {
+            const byte = this.readUint8();
+            value = (value << 7) | (byte & 0x7F);
+
+            if (!(byte & 0x80))
+                return value;
+        }
+    }
+
+    parse() {
+        const headerID = this.readString(4);
+
+        if (headerID !== "MThd")
+            throw new Error("Not a valid MIDI file: missing MThd header.");
+
+        const headerLength = this.readUint32();
+
+        if (headerLength < 6)
+            throw new Error("Invalid MIDI header.");
+
+        const format = this.readUint16();
+        const trackCount = this.readUint16();
+        const division = this.readUint16();
+
+        // Skip any unusual extra header bytes.
+        this.offset += headerLength - 6;
+
+        this.header = {
+            format,
+            trackCount,
+            division
+        };
+
+        for (let i = 0; i < trackCount; i++)
+            this.tracks.push(this.parseTrack(i));
+
+        return {
+            header: this.header,
+            tracks: this.tracks
+        };
+    }
+
+    parseTrack(index) {
+        const id = this.readString(4);
+
+        if (id !== "MTrk")
+            throw new Error(`Expected MTrk at track ${index}, found ${id}.`);
+
+        const length = this.readUint32();
+        const end = this.offset + length;
+
+        const events = [];
+        let tick = 0;
+        this.runningStatus = null;
+
+        while (this.offset < end) {
+            const deltaTime = this.readVariableLength();
+            tick += deltaTime;
+
+            let status = this.readUint8();
+
+            // Running status.
+            if (status < 0x80) {
+                if (this.runningStatus === null)
+                    throw new Error("Invalid running status.");
+
+                this.offset--;
+                status = this.runningStatus;
+            } else if (status < 0xF0) {
+                this.runningStatus = status;
+            }
+
+            // MIDI channel message.
+if (status >= 0x80 && status <= 0xEF) {
+    const type = status >> 4;
+    const channel = status & 0x0F;
+
+    let data1;
+
+    // Running status means the byte we already read is data1.
+    if (status < 0x80) {
+        data1 = status;
+        status = this.runningStatus;
+    } else {
+        this.runningStatus = status;
+        data1 = this.readUint8();
+    }
+
+    const data2 =
+        (type !== 0xC && type !== 0xD)
+            ? this.readUint8()
+            : null;
+if (type === 0x9 && data2 === 0) {
+    events.push({
+        tick,
+        deltaTime,
+        type: 0x8,
+        channel,
+        data1,
+        data2: 0
+    });
+} else {
+    events.push({
+        tick,
+        deltaTime,
+        type,
+        channel,
+        data1,
+        data2
+    });
+}
+
+    continue;
+}
+
+            // System / meta event.
+            if (status === 0xFF) {
+                const metaType = this.readUint8();
+                const length = this.readVariableLength();
+
+                const bytes = new Uint8Array(
+                    this.data.buffer,
+                    this.data.byteOffset + this.offset,
+                    length
+                );
+
+                this.offset += length;
+
+                events.push({
+                    tick,
+                    deltaTime,
+                    type: "meta",
+                    metaType,
+                    data: Array.from(bytes)
+                });
+
+                // End of track.
+                if (metaType === 0x2F)
+                    break;
+
+                continue;
+            }
+
+            // SysEx.
+            if (status === 0xF0 || status === 0xF7) {
+                const length = this.readVariableLength();
+
+                const bytes = new Uint8Array(
+                    this.data.buffer,
+                    this.data.byteOffset + this.offset,
+                    length
+                );
+
+                this.offset += length;
+
+                events.push({
+                    tick,
+                    deltaTime,
+                    type: "sysex",
+                    status,
+                    data: Array.from(bytes)
+                });
+
+                continue;
+            }
+
+            throw new Error(
+                `Unsupported MIDI status 0x${status.toString(16)}`
+            );
+        }
+
+        this.offset = end;
+
+        return {
+            index,
+            length,
+            events
+        };
+    }
+}
+
+function noteName(note) {
+    const names = [
+        "C", "C#", "D", "D#", "E", "F",
+        "F#", "G", "G#", "A", "A#", "B"
+    ];
+
+    return names[note % 12] + (Math.floor(note / 12) - 1);
+}
+
+function metaName(type) {
+    const names = {
+        0x01: "Text",
+        0x02: "Copyright",
+        0x03: "Track Name",
+        0x04: "Instrument Name",
+        0x05: "Lyric",
+        0x06: "Marker",
+        0x07: "Cue Point",
+        0x20: "Channel Prefix",
+        0x2F: "End of Track",
+        0x51: "Set Tempo",
+        0x54: "SMPTE Offset",
+        0x58: "Time Signature",
+        0x59: "Key Signature",
+        0x7F: "Sequencer Specific"
+    };
+
+    return names[type] ?? `Meta 0x${type.toString(16)}`;
+}
+
+function formatEvent(event) {
+    if (event.type === "meta") {
+        let extra = "";
+
+        if (event.metaType === 0x03 ||
+            event.metaType === 0x04 ||
+            event.metaType === 0x01) {
+            extra = ` "${new TextDecoder().decode(new Uint8Array(event.data))}"`;
+        }
+
+        if (event.metaType === 0x51 && event.data.length === 3) {
+            const usPerQuarter =
+                (event.data[0] << 16) |
+                (event.data[1] << 8) |
+                event.data[2];
+
+            extra = ` ${usPerQuarter} µs/quarter`;
+        }
+
+        return `META ${metaName(event.metaType)}${extra}`;
+    }
+
+    if (event.type === "sysex")
+        return `SYSEX (${event.data.length} bytes)`;
+
+    const names = {
+        0x8: "Note Off",
+        0x9: "Note On",
+        0xA: "Poly Aftertouch",
+        0xB: "Control Change",
+        0xC: "Program Change",
+        0xD: "Channel Aftertouch",
+        0xE: "Pitch Bend"
+    };
+
+    let text = `${names[event.type] ?? "Unknown"} ch=${event.channel + 1}`;
+
+    if (event.type === 0x8 || event.type === 0x9) {
+        text += ` ${noteName(event.data1)} velocity=${event.data2}`;
+    } else if (event.type === 0xC) {
+        text += ` program=${event.data1}`;
+    } else {
+        text += ` ${event.data1}`;
+
+        if (event.data2 !== null)
+            text += ` ${event.data2}`;
+    }
+
+    return text;
+}
+
+function showMIDI(midi, fileName) {
+    let output = "";
+
+    output += `File: ${fileName}\n`;
+    output += `Format: ${midi.header.format}\n`;
+    output += `Tracks: ${midi.header.trackCount}\n`;
+    output += `Ticks per quarter note: ${midi.header.division}\n\n`;
+
+    midi.tracks.forEach(track => {
+        output += `===== Track ${track.index + 1} =====\n`;
+        output += `Events: ${track.events.length}\n\n`;
+
+        for (const event of track.events) {
+            output += `${String(event.tick).padStart(8)}  `;
+            output += formatEvent(event);
+            output += "\n";
+        }
+
+        output += "\n";
+    });
+
+    document.querySelector("#output").textContent = output;
+}
+
+function midiFrequency(note) {
+        const normal =
+        440 * Math.pow(2, (note - 69.3) / 12);
+
+    const steps =
+        Math.round(31 * Math.log2(normal / 440));
+ 
+    return 440 * Math.pow(2, steps / 31);
+}
+function getInitialTempo(midi) {
+    // 120 BPM fallback
+    let tempo = 500000;
+
+    for (const track of midi.tracks) {
+        for (const event of track.events) {
+            if (event.type === "meta" && event.metaType === 0x51) {
+                tempo =
+                    (event.data[0] << 16) |
+                    (event.data[1] << 8) |
+                    event.data[2];
+
+                return tempo;
+            }
+        }
+    }
+
+    return tempo;
+}
+function getTempoEvents(midi) {
+    const events = [];
+
+    for (const track of midi.tracks) {
+        for (const event of track.events) {
+            if (
+                event.type === "meta" &&
+                event.metaType === 0x51 &&
+                event.data.length === 3
+            ) {
+                const tempo =
+                    (event.data[0] << 16) |
+                    (event.data[1] << 8) |
+                    event.data[2];
+
+                events.push({
+                    tick: event.tick,
+                    tempo
+                });
+            }
+        }
+    }
+
+    events.sort((a, b) => a.tick - b.tick);
+
+    // MIDI default is 120 BPM.
+    if (events.length === 0 || events[0].tick !== 0) {
+        events.unshift({
+            tick: 0,
+            tempo: 500000
+        });
+    }
+
+    return events;
+}
+function createTickToSeconds(midi) {
+    const tempoMap = createTempoMap(midi);
+    const ticksPerQuarter = midi.header.division;
+
+    const map = [];
+    const tempoMult=1.2;
+    let seconds = 0;
+    let previousTick = 0;
+    let tempo = tempoMap[0].tempo;
+
+    for (const event of tempoMap) {
+        if (event.tick === 0) {
+            tempo = event.tempo;
+            continue;
+        }
+
+        const deltaTicks = event.tick - previousTick;
+        
+        seconds +=
+            deltaTicks *
+            tempo /
+            1_000_000 /
+            ticksPerQuarter /
+            tempoMult; 
+
+        map.push({
+            tick: event.tick,
+            seconds
+        });
+
+        previousTick = event.tick;
+        tempo = event.tempo;
+    }
+
+    return function(tick) {
+        // Find the last tempo change before this tick.
+        let previous = {
+            tick: 0,
+            seconds: 0
+        };
+
+        let previousTempo = tempoMap[0].tempo;
+
+        for (let i = 0; i < tempoMap.length; i++) {
+            const event = tempoMap[i];
+
+            if (event.tick > tick)
+                break;
+
+            if (i > 0) {
+                previous = map[i - 1];
+            }
+
+            previousTempo = event.tempo;
+        }
+
+        return previous.seconds +
+            (tick - previous.tick) *
+            previousTempo /
+            1_000_000 /
+            ticksPerQuarter /
+            tempoMult;
+    };
+}
+function createTempoMap(midi) {
+    const events = [];
+
+    for (const track of midi.tracks) {
+        for (const event of track.events) {
+            if (
+                event.type === "meta" &&
+                event.metaType === 0x51 &&
+                event.data.length === 3
+            ) {
+                const tempo =
+                    (event.data[0] << 16) |
+                    (event.data[1] << 8) |
+                    event.data[2];
+
+                events.push({
+                    tick: event.tick,
+                    tempo
+                });
+            }
+        }
+    }
+
+    events.sort((a, b) => a.tick - b.tick);
+
+    // Default MIDI tempo: 120 BPM
+    if (events.length === 0 || events[0].tick !== 0) {
+        events.unshift({
+            tick: 0,
+            tempo: 500000
+        });
+    }
+
+    return events;
+}
+async function renderMIDI(midi, sampleRate = 44100) {
+    const tempo = getInitialTempo(midi);
+    const ticksPerBeat = midi.header.division;
+
+
+
+    const notes = [];
+
+    let songEnd = 0;
+
+const tickToSeconds = createTickToSeconds(midi);
+
+for (const track of midi.tracks) {
+    for (const event of track.events) {
+        event.seconds = tickToSeconds(event.tick);
+    }
+}
+    for (const track of midi.tracks) {
+        for (const event of track.events) {
+            if (event.type === 0x9 && event.data2 > 0) {
+                notes.push({
+                    start: event.tick,
+                    note: event.data1,
+                    velocity: event.data2,
+                    channel: event.channel
+                });
+            } 
+        }
+    }
+
+    // Match note-ons with note-offs.
+
+    const active = new Map();
+
+
+
+    for (const track of midi.tracks) {
+        for (const event of track.events) {
+            const isOn =
+                event.type === 0x9 &&
+                event.data2 > 0;
+
+            const isOff =
+                event.type === 0x8 ||
+                (event.type === 0x9 && event.data2 === 0);
+
+            const key =
+                `${event.channel}:${event.data1}`;
+
+            if (isOn) {
+                active.set(key, event);
+            }
+
+            if (isOff) {
+                const start = active.get(key);
+
+                if (start) {
+                    const note = {
+                        start: start.tick,
+                        end: event.tick,
+                        pitch: start.data1,
+                        velocity: start.data2
+                    };
+
+                    notes.push(note);
+
+                    active.delete(key);
+
+                    songEnd = Math.max(songEnd, event.tick);
+                }
+            }
+        }
+    }
+
+    const duration =
+        tickToSeconds(songEnd) + 1;;
+
+    const samplesL =
+        new Float32Array(Math.ceil(duration * sampleRate));
+    const samplesR =
+        new Float32Array(Math.ceil(duration * sampleRate));
+        let n=0;
+      
+    for (const note of notes) {
+        n++;
+        if (n % 250 === 0) {
+            const percent = (n / notes.length * 100).toFixed(1);
+            console.log(`Rendering: ${percent}%`);
+
+            // Let the browser process the console/UI.
+            await new Promise(resolve => setTimeout(resolve, 0));
+        }
+        const start =
+    Math.floor(tickToSeconds(note.start) * sampleRate);
+
+let end =
+    Math.min(
+        samplesR.length,
+        Math.floor(tickToSeconds(note.end) * sampleRate)+0.6*sampleRate
+    );
+
+        const frequency = midiFrequency(note.pitch);
+        const amplitude = note.velocity / 127 * 0.2;
+
+        for (let i = start; i < end; i++) {
+            const t = (i - start) / sampleRate;
+            let di2=(i-start)/((end-0.55*sampleRate)-start);
+            let di=Math.min(di2,0.83);
+            let amplitud=amplitude;
+            amplitud*=1+(0.9/(0.8+0.001*frequency*frequency))
+            let temp=waveform(frequency * t,Math.max(3.4-Math.sqrt(frequency/112),0.6)+0.6*Math.cos(frequency/50)) * amplitud*((1-di*di*di*di)/(1+di2*di2))*(1+frequency/4000);
+            const angle = frequency/300+note.velocity*5+(end-start)/(sampleRate*0.5)+start/(sampleRate*0.9);
+ 
+const leftGain = Math.cos(angle); 
+const rightGain = Math.sin(angle); 
+            samplesL[i] += temp*leftGain; 
+            samplesR[i] += temp*rightGain; 
+        }    
+    }
+    n=0;
+ let maxi = 0.000000001;
+
+for (let i = 0; i < samplesL.length; i++) {
+    maxi = Math.max(maxi, Math.abs(samplesL[i]));
+    maxi = Math.max(maxi, Math.abs(samplesR[i]));
+}
+
+console.log("Peak:", maxi);
+
+const gain = 0.99 / maxi;
+
+for (let i = 0; i < samplesL.length; i++) {
+    samplesL[i] *= gain;
+    samplesR[i] *= gain;
+}
+    return [samplesL,samplesR];    
+} 
+function sixth(x){
+return x*x*x*x*x*x;
+}
+function waveform(phase, type) {
+    type+=0.6+Math.random()*0.15; 
+    phase %= 1;
+    if (phase < 0) phase += 1;
+    const waveforms = [
+        // sine 
+        p => Math.sin(p * Math.PI * 2),
+
+        // triangle
+        p => (1 - 4 * Math.abs(Math.round(p) - p))*0.9,
+
+        // square 
+        p => (p < 0.5 ? 1 : -1)*0.6,
+
+        // sawtooth
+        p => (2 * p - 1)*0.5
+    ];
+
+    type = Math.max(0, Math.min(waveforms.length - 1, type));
+
+    const i = Math.floor(type);
+    const f = type - i;
+
+    if (i === waveforms.length - 1)
+        return waveforms[i](phase);
+
+    const a = waveforms[i](phase);
+    const b = waveforms[i + 1](phase);
+
+    return a * (1 - f) + b * f;
+}
+async function encodeMP3(left, right, sampleRate = 44100) {
+    const mp3encoder = new lamejs.Mp3Encoder(
+        2,
+        sampleRate,
+        192
+    );
+
+    const mp3Data = [];
+    const blockSize = 1152;
+
+    const left16 = new Int16Array(left.length);
+    const right16 = new Int16Array(right.length);
+
+    console.log("Converting audio to 16-bit PCM...");
+
+    for (let i = 0; i < left.length; i++) {
+        left16[i] =
+            Math.max(-1, Math.min(1, left[i])) * 32767;
+
+        right16[i] =
+            Math.max(-1, Math.min(1, right[i])) * 32767;
+    }
+
+    console.log("Encoding MP3...");
+
+    const totalBlocks = Math.ceil(left.length / blockSize);
+    const logEvery = Math.max(1, Math.floor(totalBlocks / 20));
+
+    for (let i = 0, block = 0; i < left.length; i += blockSize, block++) {
+        const leftChunk =
+            left16.subarray(i, i + blockSize);
+
+        const rightChunk =
+            right16.subarray(i, i + blockSize);
+
+        const encoded =
+            mp3encoder.encodeBuffer(
+                leftChunk,
+                rightChunk
+            );
+
+        if (encoded.length > 0)
+            mp3Data.push(encoded);
+
+        if (block % logEvery === 0) {
+            const percent =
+                ((i / left.length) * 100).toFixed(0);
+
+            console.log(
+                `MP3 encoding: ${percent}% (${block}/${totalBlocks})`
+            );
+
+            // Let the browser update the console/UI.
+            await new Promise(resolve =>
+                setTimeout(resolve, 0)
+            );
+        }
+    }
+
+    console.log("Finalizing MP3...");
+
+    const finalBlock = mp3encoder.flush();
+
+    if (finalBlock.length > 0)
+        mp3Data.push(finalBlock);
+
+    console.log("MP3 export complete.");
+
+    return new Blob(mp3Data, {
+        type: "audio/mpeg"
+    });
+}
+async function downloadMP3(left, right, filename = "song.mp3") {
+    const blob = await encodeMP3(left, right);
+
+    const url = URL.createObjectURL(blob);
+
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    URL.revokeObjectURL(url);
+}
+async function doRest(midi){
+
+let data=await renderMIDI(midi); 
+playSamples(data[0],data[1]);
+await downloadMP3(data[0], data[1]);
+}
+function playSamples(left, right, sampleRate = 44100) {
+    const audioContext = new AudioContext();
+
+    const length = Math.min(left.length, right.length);
+
+    const buffer = audioContext.createBuffer(
+        2,               // 2 channels
+        length,
+        sampleRate 
+    );
+
+    buffer.copyToChannel(left, 0);
+    buffer.copyToChannel(right, 1);
+
+    const source = audioContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioContext.destination);
+    source.start();
+}
+async function loadFile(file) {
+    try { 
+        const buffer = await file.arrayBuffer();
+        const parser = new MIDIParser(buffer);
+        const midi = parser.parse();
+
+        //showMIDI(midi, file.name);
+
+        //console.log("Parsed MIDI:", midi);
+        await doRest(midi);
+    } catch (error) {
+        document.querySelector("#output").innerHTML =
+            `<span class="error">${error.message}</span>`;
+
+        console.error(error);
+    }
+}
+
+const dropZone = document.querySelector("#dropZone");
+const fileInput = document.querySelector("#fileInput");
+
+dropZone.addEventListener("click", () => fileInput.click());
+
+fileInput.addEventListener("change", () => {
+    if (fileInput.files.length)
+        loadFile(fileInput.files[0]);
+});
+
+dropZone.addEventListener("dragover", event => {
+    event.preventDefault(); 
+    dropZone.classList.add("dragover");
+});
+
+dropZone.addEventListener("dragleave", () => {
+    dropZone.classList.remove("dragover");
+});
+
+dropZone.addEventListener("drop", event => {
+    event.preventDefault();
+    dropZone.classList.remove("dragover");
+
+    const file = event.dataTransfer.files[0];
+
+    if (file)
+        loadFile(file);
+});
+
+</script>
+
+
+
+</body></html>
