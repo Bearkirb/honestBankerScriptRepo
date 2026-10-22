@@ -1,23 +1,27 @@
-const c = document.getElementById("m"), ctx = c.getContext("2d");
-ctx.imageSmoothingEnabled = false;
-const BASE_W = 640;
-const BASE_H = 360;
-
-function resizeCanvas() {
-    const maxScale = Math.min(
-        window.innerWidth / BASE_W,
-        window.innerHeight / BASE_H
-    );
-
-    // Snap to half-integer scales to reduce moire or whatever its called
-    const scale = Math.max(0.5, Math.floor(maxScale * 4) / 4);
-
-    c.style.width = `${BASE_W * scale}px`;
-    c.style.height = `${BASE_H * scale}px`;
+//MATH
+(() => {
+    const MathExtended = {
+        lerp(a,b,t){
+        return a+t*(b-a);
+        },
+        smoothMin(a, b, k = 1) {
+            let h = Math.max(k - Math.abs(a - b), 0) / k;
+            return Math.min(a, b) - (h * h * k) * 0.25;
+        },
+        smoothMax(a, b, k = 1) {
+            let h = Math.max(k - Math.abs(a - b), 0) / k;
+            return Math.max(a, b) + (h * h * k) * 0.25;
+        },
+        smoothSign(x, s) {
+            return x / Math.sqrt(x * x + s * s)
+        },
+    };
+    Object.assign(Math, MathExtended);
+})();
+const point = {
+    x: 0,
+    y: 0
 }
-
-window.addEventListener("resize", resizeCanvas);
-resizeCanvas();
 
 class Input {
     constructor(canvas) {
@@ -247,61 +251,6 @@ this.mouseReleased = false;
     }
 }
 
-const input = new Input(document.getElementById("m"));
-
-const point = {
-    x: 0,
-    y: 0
-}
-const triOrder = [0, 1, 2, 0, 2, 3];
-
-
-(() => {
-    const MathExtended = {
-        lerp(a,b,t){
-        return a+t*(b-a);
-        },
-        smoothMin(a, b, k = 1) {
-            let h = Math.max(k - Math.abs(a - b), 0) / k;
-            return Math.min(a, b) - (h * h * k) * 0.25;
-        },
-        smoothMax(a, b, k = 1) {
-            let h = Math.max(k - Math.abs(a - b), 0) / k;
-            return Math.max(a, b) + (h * h * k) * 0.25;
-        },
-        smoothSign(x, s) {
-            return x / Math.sqrt(x * x + s * s)
-        },
-        catmullRom4(p0, p1, p2, p3, t) {
-    const t2 = t * t;
-    const t3 = t2 * t;
-
-    return {
-        x: 0.5 * (
-            2 * p1.x +
-            (-p0.x + p2.x) * t +
-            (2*p0.x - 5*p1.x + 4*p2.x - p3.x) * t2 +
-            (-p0.x + 3*p1.x - 3*p2.x + p3.x) * t3
-        ),
-
-        y: 0.5 * (
-            2 * p1.y +
-            (-p0.y + p2.y) * t +
-            (2*p0.y - 5*p1.y + 4*p2.y - p3.y) * t2 +
-            (-p0.y + 3*p1.y - 3*p2.y + p3.y) * t3
-        ),
-
-        tilt: 0.5 * (
-            2 * p1.tilt +
-            (-p0.tilt + p2.tilt) * t +
-            (2*p0.tilt - 5*p1.tilt + 4*p2.tilt - p3.tilt) * t2 +
-            (-p0.tilt + 3*p1.tilt - 3*p2.tilt + p3.tilt) * t3
-        )
-    };
-    },
-    };
-    Object.assign(Math, MathExtended);
-})();
 
 const UISize = {
     fill: () => ({ type: "fill" }),
@@ -722,7 +671,6 @@ class UIStack extends UIPanel {
         });
     }
 }
-
 class UIOverlayLayout extends UILayout {
     measure(container, available, context) {
         let width = 0;
@@ -737,17 +685,152 @@ class UIOverlayLayout extends UILayout {
         return { width, height };
     }
 
-    arrange(container, contentBounds, context) {
-        for (const child of container.children) {
-            child.arrange({ ...contentBounds }, context);
-        }
-    }
-}
+    
+arrange(container, contentBounds, context) {
+    for (const child of container.children) {
+        const measured = child.measure(
+            {
+                width: contentBounds.width,
+                height: contentBounds.height
+            },
+            context
+        );
 
+        const width = child.width?.type === "fill"
+            ? contentBounds.width
+            : child.width?.type === "percent"
+                ? contentBounds.width * child.width.value
+                : child.width?.type === "fixed"
+                    ? child.width.value
+                    : measured.width;
+
+        const height = child.height?.type === "fill"
+            ? contentBounds.height
+            : child.height?.type === "percent"
+                ? contentBounds.height * child.height.value
+                : child.height?.type === "fixed"
+                    ? child.height.value
+                    : measured.height;
+
+        child.arrange({
+            x: contentBounds.x,
+            y: contentBounds.y,
+            width,
+            height
+        }, context);
+    }
+} 
+
+}
 class UIOverlay extends UIPanel {
     constructor(options = {}) {
         super(options);
         this.layout = new UIOverlayLayout();
+    }
+}
+class UIGameCanvas extends UIElement {
+    constructor({
+        canvas,
+        fit = "stretch",
+        ...options
+    } = {}) {
+        super(options);
+        this.canvas = canvas;
+        this.fit = fit;
+    }
+
+    measureContent() {
+        return {
+            width: this.canvas?.width ?? 0,
+            height: this.canvas?.height ?? 0
+        };
+    }
+
+    drawContent(renderer) {
+        if (!this.canvas) return;
+
+        const ctx = renderer.ctx;
+        const b = this.bounds;
+
+        if (b.width <= 0 || b.height <= 0) return;
+
+        ctx.save();
+
+        if (this.fit === "contain" || this.fit === "cover") {
+            const sx = b.width / this.canvas.width;
+            const sy = b.height / this.canvas.height;
+            const scale = this.fit === "contain"
+                ? Math.min(sx, sy)
+                : Math.max(sx, sy);
+
+            const width = this.canvas.width * scale;
+            const height = this.canvas.height * scale;
+            const x = b.x + (b.width - width) / 2;
+            const y = b.y + (b.height - height) / 2;
+
+            if (this.fit === "cover") {
+                ctx.beginPath();
+                ctx.rect(b.x, b.y, b.width, b.height);
+                ctx.clip();
+            }
+
+            ctx.drawImage(this.canvas, x, y, width, height);
+        } else {
+            ctx.drawImage(
+                this.canvas,
+                b.x, b.y, b.width, b.height
+            );
+        }
+
+        ctx.restore();
+    }  
+}
+class UIGameScreen extends UIOverlay {
+    constructor({
+        gameCanvas,
+        onUpdate = null,
+        ...options
+    } = {}) {
+        super(options);
+
+        this.gameView = new UIGameCanvas({
+            canvas: gameCanvas,
+            width: UISize.fill(),
+            height: UISize.fill()
+        });
+
+        this.add(this.gameView);
+
+        this.updateCallbacks = [];
+
+        if (onUpdate) {
+            this.addUpdater(onUpdate);
+        }
+    }
+
+    addUpdater(callback) {
+        if (typeof callback !== "function") {
+            throw new TypeError("Updater must be a function.");
+        }
+
+        this.updateCallbacks.push(callback);
+        return this;
+    }
+
+    removeUpdater(callback) {
+        const index = this.updateCallbacks.indexOf(callback);
+
+        if (index !== -1) {
+            this.updateCallbacks.splice(index, 1);
+        }
+
+        return this;
+    }
+
+    update(input, ui) {
+        for (const callback of [...this.updateCallbacks]) {
+            callback(input, ui, this);
+        }
     }
 }
 class UILabel extends UIElement {
@@ -990,8 +1073,6 @@ class UIButton extends UILabel {
     };
 }
 }
-
-
 class UIImage extends UIElement {
     constructor({
         src = null,
@@ -1101,30 +1182,6 @@ class UIImage extends UIElement {
         ctx.restore();
     }
 }
-const defaultUITheme = {
-    colors: {
-        background: "rgb(0,0,0)",
-        panel: "rgb(30,40,50,0.1)",
-        border: "#606579",
-        text: "#334422",
-        muted: "#aaaab7",
-        button: "#343747",
-        focus: "#b8a0ff",
-        buttonHover: "#484c61",
-        buttonPressed: "#252735"
-    },
-
-    fonts: {
-        title: '36px "Gravitas One"',
-        body: '26px "IM Fell DW Pica"',
-        small: '12px "IM Fell DW Pica"'
-    },
-
-    borders: {
-        panel: 1,
-        button: 1
-    }
-};
 class UIManager {
     constructor(canvas, theme = defaultUITheme) {
         this.canvas = canvas;
@@ -1378,6 +1435,9 @@ update(input) {
     }
 
     this.confirmWasDown = confirmDown;
+
+    //Do the updates if the given screen has its own.  Very nice
+    this.activeScreen?.update?.(input, this);
 }
     
 
@@ -1410,6 +1470,8 @@ update(input) {
     }
 
 }
+
+
 const GFXUtils = {
     createMissingTex() {
         let noTexTex = new OffscreenCanvas(256, 256);
@@ -1440,9 +1502,6 @@ const GFXUtils = {
     },
 }
 let noTexTex = GFXUtils.createMissingTex();
-
-
-
 class GLContext {
     constructor(canvas, attribs) {
         this.canvas = canvas;
@@ -1776,116 +1835,6 @@ class GLParticles {
         gl.drawArrays(gl.POINTS, 0, this.count);
     }
 }
-/*
-if(window.parent.gfx==undefined){
-window.parent.gfx=new GLContext(new OffscreenCanvas(640, 360),{premultipliedAlpha: false});
-}
-
-
-let gfx=window.parent.gfx;
-*/
-//GL{
-let gfx = new GLContext(new OffscreenCanvas(640, 360), {
-    premultipliedAlpha: false,
-});
-const gl = gfx.gl;
-gl.getExtension("EXT_color_buffer_float");
-
-const mainProgram = gfx.createProgram({
-    vertex: document.getElementById("vertex-shader").textContent,
-    fragment: document.getElementById("fragment-shader").textContent,
-});
-gl.useProgram(mainProgram.program);
-
-const camMat = mainProgram.uniform("camera");
-const glLights = mainProgram.uniform("lightPos");
-const iTime = mainProgram.uniform("iTime");
-const iChannel0 = mainProgram.uniform("iChannel0");
-const iChannel1 = mainProgram.uniform("iChannel1");
-
-gl.uniform1i(iChannel0, 0);
-gl.uniform1i(iChannel1, 1);
-
-const atlas = gfx.createTexture(noTexTex, {
-    minFilter: gl.NEAREST,
-    magFilter: gl.NEAREST,
-    mipmap: false,
-});
-const atlasNormals = gfx.createTexture(noTexTex, {
-    minFilter: gl.NEAREST,
-    magFilter: gl.NEAREST,
-    mipmap: false,
-});
-
-let room1Tilemap = await atlas.setImage(room_1_tilemap);
-let room1TilemapNormal = await atlasNormals.setImage(room_1_tilemap_normal);
-atlas.bind(0);
-atlasNormals.bind(1);
-const particleProgram = gfx.createProgram({
-    vertex: document.getElementById("particle-vertex").textContent,
-    fragment: document.getElementById("particle-fragment").textContent,
-});
-const camMatp = particleProgram.uniform("camera");
-const worldMesh = gfx.createMesh({
-    dynamic: false,
-    attributes: {
-        coordinates: {
-            size: 3,
-            data: []
-        },
-        uv: {
-            size: 3,
-            data: []
-        }
-    },
-});
-const entitiesMesh = gfx.createMesh({
-    dynamic: true,
-    attributes: {
-        coordinates: {
-            size: 3,
-            data: []
-        },
-        uv: {
-            size: 3,
-            data: []
-        }
-    },
-});
-const sceneTarget = gfx.createRenderTarget({
-    format: gl.RGBA16F
-});
-const ping = gfx.createRenderTarget();
-const pong = gfx.createRenderTarget();
-const bloomPass = gfx.createPostProcess({
-    vertex: document.getElementById("ppfxDefault").textContent,
-    fragment: document.getElementById("bloom-shader").textContent,
-});
-const boringPass = gfx.createPostProcess({
-    vertex: document.getElementById("ppfxDefault").textContent,
-    fragment: document.getElementById("boring-shader").textContent,
-});
-const compPass = gfx.createPostProcess({
-    vertex: document.getElementById("ppfxDefault").textContent,
-    fragment: document.getElementById("composite-shader").textContent,
-});
-const impactFrame = compPass.program.uniform("impactFrame");
-const posBuffer = gl.createBuffer();
-const uvBuffer = gl.createBuffer();
-
-//}
-
-gl.enable(gl.BLEND);
-gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-
-//gl.enable(gl.DEPTH_TEST);
-
-//gl.depthMask(false)
-gl.viewport(0, 0, 640, 360);
-gl.clearColor(0, 0, 0, 1);
-
-let glparticles = new GLParticles(gl);
-
 class TextureAtlas {
     constructor(images, maxWidth = 2048) {
         this.images = [...images];
@@ -1949,32 +1898,6 @@ class TextureAtlas {
     }
 }
 
-let entityAtlas = new TextureAtlas([{
-        image: await GFXUtils.toBitmap(player_tilemap),
-        name: "player"
-    },
-    {
-        image: await GFXUtils.toBitmap(spider_tilemap),
-        name: "spider"
-    },
-    {
-        image: await GFXUtils.toBitmap(rusty_sword),
-        name: "rustySword"
-    },
-]);
-let entityAtlasNormal = new TextureAtlas([{
-        image: await GFXUtils.toBitmap(player_tilemap_normal),
-        name: "player"
-    },
-    {
-        image: await GFXUtils.toBitmap(spider_tilemap_normal),
-        name: "spider"
-    },
-    {
-        image: await GFXUtils.toBitmap(rusty_sword_normal),
-        name: "rustySword"
-    },
-]);
 
 const PhysUtils = {
     solveConstraint(ts, x, y, a, b = null) {
@@ -2242,8 +2165,32 @@ class Limb {
     }
 }
 
-
-
+let entityAtlas = new TextureAtlas([{
+        image: await GFXUtils.toBitmap(player_tilemap),
+        name: "player"
+    },
+    {
+        image: await GFXUtils.toBitmap(spider_tilemap),
+        name: "spider"
+    },
+    {
+        image: await GFXUtils.toBitmap(rusty_sword),
+        name: "rustySword"
+    },
+]);
+let entityAtlasNormal = new TextureAtlas([{
+        image: await GFXUtils.toBitmap(player_tilemap_normal),
+        name: "player"
+    },
+    {
+        image: await GFXUtils.toBitmap(spider_tilemap_normal),
+        name: "spider"
+    },
+    {
+        image: await GFXUtils.toBitmap(rusty_sword_normal),
+        name: "rustySword"
+    },
+]);
 class Entity {
     constructor(nodes, limbs, z, name) {
         this.nodes = nodes;
@@ -2255,6 +2202,7 @@ class Entity {
         this.templateLimbs = limbs.map((l) => l.clone());
         this.z = z;
         this.name = name;
+        this.level="bank"
         let lx = Infinity;
         let ly = Infinity;
         let mx = -Infinity;
@@ -2276,6 +2224,9 @@ class Entity {
         this.hitbox.onGround = false;
         this.vertices = new Float32Array(this.limbs.length * 18);
         this.uvs = [];
+
+        this.health;
+        
     }
     solveAxis(dx, dy, level) {
         const tile = Level.tileSize * 0.5;
@@ -2377,7 +2328,7 @@ class Entity {
             for (const foot of feet) {
                 foot.tx = this.hitbox.cx * 2 + foot.offsetX;
                 foot.ty = this.hitbox.cy * 2 + foot.offsetY;
-                let fland = level.raycast(foot.tx, foot.ty + 17, 0, -1);
+                let fland = this.level.raycast(foot.tx, foot.ty + 17, 0, -1);
 
                 if (fland) {
                     foot.ty = fland.y;
@@ -2388,7 +2339,7 @@ class Entity {
             for (const foot of feet) {
                 let pottx = this.hitbox.cx * 2 + tolerance * Math.smoothSign(this.hitbox.xv, 1) + foot.offsetX / 2.5;
 
-                let fland = level.raycast(pottx, foot.y + 17, 0, -1);
+                let fland = this.level.raycast(pottx, foot.y + 17, 0, -1);
 
                 if (fland && Math.abs(fland.y - foot.y) < 38) {
                     let ref = feet.toSorted(
@@ -2402,7 +2353,7 @@ class Entity {
                 } else {
                     foot.tx += this.hitbox.xv;
                     foot.ty += this.hitbox.yv;
-                    let fland = level.raycast(foot.tx, foot.ty + 17, 0, -1);
+                    let fland = this.level.raycast(foot.tx, foot.ty + 17, 0, -1);
 
                     if (fland) {
                         foot.ty = fland.y;
@@ -2412,109 +2363,6 @@ class Entity {
         }
     }
 }
-class Weapon {
-    constructor(owner, node1, node2, x, y, w, h, name) {
-        this.name = name;
-        this.owner = owner;
-        this.nodeP = node1;
-        this.nodeA = node2;
-        this.x = x;
-        this.y = y;
-        this.w = w;
-        this.h = h;
-        this.angle = Math.PI / 2-0.5+ Math.random() * 0.1
-        this.z = this.owner.z - 0.0005;
-        this.refPoints = [{
-                x: this.x,
-                y: this.y
-            },
-            {
-                x: this.x + w,
-                y: this.y
-            },
-            {
-                x: this.x + w,
-                y: this.y + h
-            },
-            {
-                x: this.x,
-                y: this.y + h
-            },
-        ];
-        const cx = this.x + w / 2;
-        const cy = this.y + h / 2;
-        const c = Math.cos(this.angle);
-        const s = Math.sin(this.angle);
-        for (const p of this.refPoints) {
-            const x = p.x - cx;
-            const y = p.y - cy;
-
-            p.x = cx + x * c - y * s;
-            p.y = cy + x * s + y * c;
-        }
-        this.vertices = new Float32Array(18);
-        this.uvs = new Float32Array(18);
-        this.assignUvs();
-    }
-    assignUvs() {
-        let uvt = [{
-            x: 0,
-            y: 0
-        }, {
-            x: this.w,
-            y: 0
-        }, {
-            x: this.w,
-            y: this.h
-        }, {
-            x: 0,
-            y: this.h
-        }]
-        for (var i = 0; i < 6; i++) {
-            let newCoord = entityAtlas.getUV(
-                this.name,
-                uvt[triOrder[i]].x,
-                uvt[triOrder[i]].y,
-            );
-            this.uvs[i * 3] = newCoord.x;
-            this.uvs[i * 3 + 1] = newCoord.y;
-            this.uvs[i * 3 + 2] = this.z;
-        }
-    }
-    displayHitbox() {
-
-        glparticles.add(this.vertices[0], this.vertices[1], 0.99, 0, 1, 1, 1);
-        glparticles.add(this.vertices[3], this.vertices[4], 0.99, 0, 1, 1, 1);
-        glparticles.add(this.vertices[6], this.vertices[7], 0.99, 0, 1, 1, 1);
-        glparticles.add(this.vertices[9], this.vertices[10], 0.99, 0, 1, 1, 1);
-    }
-    constructVertexArray() {
-
-        for (var i = 0; i < 6; i++) {
-            //(init,curr,ic,c,p)
-            PhysUtils.rotateFromReference(
-                point,
-                this.owner.templateNodes[this.nodeP],
-                this.owner.nodes[this.nodeP],
-                this.owner.templateNodes[this.nodeA],
-                this.owner.nodes[this.nodeA],
-                this.refPoints[triOrder[i]],
-                this.owner.facing,
-            );
-
-            this.vertices[i * 3] = point.x / 2;
-            this.vertices[i * 3 + 1] = point.y / 2;
-            this.vertices[i * 3 + 2] = this.z;
-
-        }
-    }
-}
-const EntityUV = {
-    ArachnidBoss: [{ x: 0, y: 0, z: -0.5 }, { x: 136, y: 0, z: 0 }, { x: 121, y: 0, z: 0 }, { x: 136, y: 0, z: 0 }, { x: 121, y: 0, z: 0 }, { x: 136, y: 0, z: 0 }, { x: 121, y: 0, z: 0 }, { x: 136, y: 0, z: 0 }, { x: 121, y: 0, z: 0 }, { x: 136, y: 0, z: -1 }, { x: 121, y: 0, z: -1 }, { x: 136, y: 0, z: -1 }, { x: 121, y: 0, z: -1 }, { x: 136, y: 0, z: -1 }, { x: 121, y: 0, z: -1 }, { x: 136, y: 0, z: -1 }, { x: 121, y: 0, z: -1 }, ],
-    Humanoid: [{ x: 0, y: 0, z: 0 }, { x: 53, y: 0, z: -1 }, { x: 84, y: 0, z: 1 }, { x: 52, y: 34, z: -0.5 }, { x: 83, y: 34, z: 0.95 }, { x: 48, y: 66, z: 0.1 }, { x: 78, y: 66, z: 0.2 }, { x: 48, y: 103, z: 0.8 }, { x: 78, y: 103, z: 0.9 }, ]
-
-};
-
 class Humanoid extends Entity {
     constructor(x, y, z, name) {
         let previewNodes = [
@@ -2579,11 +2427,11 @@ class Humanoid extends Entity {
         this.hitbox.onGround = false;
         this.hitbox.yv -= 0.2;
         if (Math.abs(this.hitbox.xv) > Math.abs(this.hitbox.yv)) {
-            this.solveAxis(this.hitbox.xv, 0, level);
-            this.solveAxis(0, this.hitbox.yv, level);
+            this.solveAxis(this.hitbox.xv, 0, this.level);
+            this.solveAxis(0, this.hitbox.yv, this.level);
         } else {
-            this.solveAxis(0, this.hitbox.yv, level);
-            this.solveAxis(this.hitbox.xv, 0, level);
+            this.solveAxis(0, this.hitbox.yv, this.level);
+            this.solveAxis(this.hitbox.xv, 0, this.level);
         }
         this.hitbox.xv *= this.hitbox.onGround ? 0.92 : 0.98;
         this.hitbox.yv *= 0.99;
@@ -2745,6 +2593,404 @@ class Humanoid extends Entity {
 
     }
 }
+class ArachnidBoss extends Entity {
+    constructor(x, y, z, name) {
+        let previewNodes = [
+            new Node(0, 100, "root", { x: 0, y: -1 }, [], "bodyRoot"),
+            new Node(0, 120, "root", { x: 0, y: -1 }, [], "bodyTap"),
+            new Node(-56, 72, "root", { x: 0, y: -1 }, [], "legR1"),
+            new Node(-56, 48, "child", { x: 0, y: -1 }, [2, 4], "kneeR1"),
+            new Node(-56, 8, "root", { x: 0, y: -1 }, [], "footR1"),
+            new Node(-52, 72, "root", { x: 0, y: -1 }, [], "legR2"),
+            new Node(-52, 48, "child", { x: 0, y: -1 }, [5, 7], "kneeR2"),
+            new Node(-52, 8, "root", { x: 0, y: -1 }, [], "footR2"),
+            new Node(-48, 72, "root", { x: 0, y: -1 }, [], "legR3"),
+            new Node(-48, 48, "child", { x: 0, y: -1 }, [8, 10], "kneeR3"),
+            new Node(-48, 8, "root", { x: 0, y: -1 }, [], "footR3"),
+            new Node(-44, 72, "root", { x: 0, y: -1 }, [], "legR4"),
+            new Node(-44, 48, "child", { x: 0, y: -1 }, [11, 13], "kneeR4"),
+            new Node(-44, 8, "root", { x: 0, y: -1 }, [], "footR4"),
+            new Node(56, 72, "root", { x: 0, y: -1 }, [], "legL1"),
+            new Node(56, 48, "child", { x: 0, y: -1 }, [14, 16], "kneeL1"),
+            new Node(56, 8, "root", { x: 0, y: -1 }, [], "footL1"),
+            new Node(52, 72, "root", { x: 0, y: -1 }, [], "legL2"),
+            new Node(52, 48, "child", { x: 0, y: -1 }, [17, 19], "kneeL2"),
+            new Node(52, 8, "root", { x: 0, y: -1 }, [], "footL2"),
+            new Node(48, 72, "root", { x: 0, y: -1 }, [], "legL3"),
+            new Node(48, 48, "child", { x: 0, y: -1 }, [20, 22], "kneeL3"),
+            new Node(48, 8, "root", { x: 0, y: -1 }, [], "footL3"),
+            new Node(44, 72, "root", { x: 0, y: -1 }, [], "legL4"),
+            new Node(44, 48, "child", { x: 0, y: -1 }, [23, 25], "kneeL4"),
+            new Node(44, 8, "root", { x: 0, y: -1 }, [], "footL4")
+        ];
+
+        let previewLimbs = [
+            new Limb(-60, 64, 120, 104, [0, 1, 2, 5, 8, 11, 14, 17, 20, 23], "body"),
+            new Limb(-64, 40, 16, 40, [2, 3], "legL1"),
+            new Limb(-64, 0, 16, 56, [3, 4], "footR1"),
+            new Limb(-60, 40, 16, 40, [5, 6], "legR2"),
+            new Limb(-60, 0, 16, 56, [6, 7], "footR2"),
+            new Limb(-56, 40, 16, 40, [8, 9], "legR3"),
+            new Limb(-56, 0, 16, 56, [9, 10], "footR3"),
+            new Limb(-52, 40, 16, 40, [11, 12], "legR4"),
+            new Limb(-52, 0, 16, 56, [12, 13], "footR4"),
+            new Limb(48, 40, 16, 40, [14, 15], "legL1"),
+            new Limb(48, 0, 16, 56, [15, 16], "footL1"),
+            new Limb(44, 40, 16, 40, [17, 18], "legL2"),
+            new Limb(44, 0, 16, 56, [18, 19], "footL2"),
+            new Limb(40, 40, 16, 40, [20, 21], "legL3"),
+            new Limb(40, 0, 16, 56, [21, 22], "footL3"),
+            new Limb(36, 40, 16, 40, [23, 24], "legL4"),
+            new Limb(36, 0, 16, 56, [24, 25], "footL4")
+        ];
+        super(previewNodes, previewLimbs, z, name);
+        this.translate(x, y);
+        this.assignUvs(EntityUV.ArachnidBoss, 1);
+
+        //███████████ Add all limb ends here!!
+        let endNodes = ["footR1", "footR2", "footR3", "footR4", "footL1", "footL2", "footL3", "footL4"];
+        this.ends = [];
+        for (var i = 0; i < this.nodes.length; i++) {
+            let node = this.nodes[i];
+            if (endNodes.includes(node.name)) {
+                node.xv = 0;
+                node.yv = 0;
+                this.ends.push(i);
+            }
+        }
+        //███████████ Init limbs accordingly
+        this.hitbox.h -= 20;
+        for (var i = 0; i < 8; i++) {
+            this.pickInitFunction("leg")(this, i * 3 + 4);
+        }
+        this.hitbox.hh = this.hitbox.h;
+        this.tic = 0;
+    }
+    displayHitbox() {
+        let hb = this.hitbox;
+
+        glparticles.add(hb.x, hb.y, 0.99, 0, 1, 1, 1);
+        glparticles.add(hb.x + hb.w, hb.y, 0.99, 0, 1, 1, 1);
+        glparticles.add(hb.x + hb.w, hb.y + hb.h, 0.99, 0, 1, 1, 1);
+        glparticles.add(hb.x, hb.y + hb.hh, 0.99, 0, 1, 1, 1);
+
+    }
+    updateHitbox() {
+        this.hitbox.onGround = false;
+        this.hitbox.yv -= 0.2;
+        if (Math.abs(this.hitbox.xv) > Math.abs(this.hitbox.yv)) {
+            this.solveAxis(this.hitbox.xv, 0, this.level);
+            this.solveAxis(0, this.hitbox.yv, this.level);
+        } else {
+            this.solveAxis(0, this.hitbox.yv, this.level);
+            this.solveAxis(this.hitbox.xv, 0, this.level);
+        }
+
+        //███████████ Tune physics and position body center. this code bro.
+        this.hitbox.xv *= this.hitbox.onGround ? 0.92 : 0.98;
+        this.hitbox.yv *= 0.99;
+        this.nodes[0].x = this.hitbox.cx * 2;
+        this.nodes[0].y = (this.hitbox.y + this.hitbox.hh * 0.5) * 2 + 2;
+        this.nodes[1].x = this.hitbox.cx * 2 + this.hitbox.xv;
+        this.nodes[1].y = (this.hitbox.y + this.hitbox.hh * 0.5) * 2 + 10;
+    }
+    //███████████ Main changes
+    static updateFunctions = {
+        normalMovement: {
+            leg(thi, ind) {
+                let curNode = thi.nodes[ind];
+                curNode.r = thi.hitbox.hh - 1;
+                curNode.tx += thi.hitbox.xv * 0.7 * (1 - Math.abs(thi.hitbox.ptotalv - thi.hitbox.totalv) * 1.5);
+                curNode.c = {
+                    x: thi.nodes[ind - 2].x,
+                    y: thi.nodes[ind - 2].y
+                };
+
+                PhysUtils.parentRefVector(thi.nodes[ind - 1].desiredVector, thi.nodes[ind - 1], {
+                    x: 0,
+                    y: ind < 14 ? -1 : 1
+                });
+
+
+                PhysUtils.springPhys(
+                    curNode,
+                    curNode.tx,
+                    curNode.ty - thi.hitbox.yv * 1,
+                    0.01 + Math.abs(thi.hitbox.xv) * 0.015 + Math.abs(thi.hitbox.yv * 0.01),
+                    0.85,
+                );
+
+            },
+        },
+    };
+    pickUpdateFunction(name, action) {
+
+        return ArachnidBoss.updateFunctions[action][name];
+    }
+    //███████████ Mainish changes
+    static initFunctions = {
+        leg(thi, ind) {
+            let curNode = thi.nodes[ind];
+            curNode.tx = curNode.x;
+            curNode.ty = curNode.y;
+            curNode.offsetX = ind * 16 - 218;
+            curNode.offsetY = -64;
+            curNode.c = {
+                x: thi.nodes[ind - 2].x,
+                y: thi.nodes[ind - 2].y
+            };
+            curNode.r = Math.hypot(curNode.x - curNode.c.x, curNode.y - curNode.c.y) - 0.1;
+        },
+    };
+    pickInitFunction(name) {
+        return ArachnidBoss.initFunctions[name];
+    }
+    orientLimbs() {
+
+        for (var i = 0; i < this.limbs.length; i++) {
+            let limb = this.limbs[i];
+            for (var j = 0; j < limb.nodes.length; j++) {
+                let node = this.nodes[limb.nodes[j]];
+
+                if (node.type == "root" && j > 1) {
+                    PhysUtils.rotateFromReference(
+                        point,
+                        this.templateNodes[limb.nodes[1]],
+                        this.nodes[limb.nodes[1]],
+                        this.templateNodes[limb.nodes[0]],
+                        this.nodes[limb.nodes[0]],
+                        this.templateNodes[limb.nodes[j]],
+                        this.facing,
+                    );
+
+                    node.x = point.x;
+                    node.y = point.y;
+                }
+            }
+        }
+    }
+    updateNodes() {
+
+        //PhysUtils.springPhys(body, tx, ty, strength, damping)
+
+        this.hitbox.ptotalv = this.hitbox.totalv;
+        this.hitbox.totalv = Math.hypot(this.hitbox.xv, this.hitbox.yv);
+
+        //███████████ Find something better
+        this.updateFeet([this.nodes[4], this.nodes[7], this.nodes[10], this.nodes[13], this.nodes[16], this.nodes[19], this.nodes[22], this.nodes[25]], 60 + Math.abs(this.hitbox.xv) * 14, );
+
+        //███████████ Run tilt and fake hitbox
+        this.hitbox.ht = 64 - Math.abs(this.hitbox.xv) * 2 + Math.min(this.hitbox.yv, 0) * 4;
+        this.hitbox.hh -= (this.hitbox.hh - this.hitbox.ht) / 8.0;
+        this.hitbox.hh = Math.max(this.hitbox.hh, 58);
+    
+        this.orientLimbs(); 
+
+        //███████████ Change
+        for (var i = 0; i < 8; i++) {
+            this.pickUpdateFunction("leg", "normalMovement")(this, i * 3 + 4);
+        }
+
+
+
+        for (var i = 0; i < this.ends.length; i++) {
+            let node = this.nodes[this.ends[i]];
+            PhysUtils.solveEnds(node, node.c, node.r);
+        }
+        for (var i = 0; i < this.nodes.length; i++) {
+            this.nodes[i].solve();
+        }
+
+    }
+}
+class EntityHandler { 
+    constructor(maxSize = 15300) {
+        this.entities = [];
+        this.vertexBuffer = new Float32Array(maxSize);
+        this.uvBuffer = new Float32Array(maxSize);
+
+        this.vertexCount = 0;
+        this.uvCount = 0;
+    }
+    add(entity) {
+        this.entities.push(entity);
+        return entity;
+    }
+    update() {
+        for (const entity of this.entities) {
+            entity.level=world.level;
+            entity.updateHitbox?.();
+            entity.updateNodes?.();
+            entity.constructVertexArray();
+        }
+    }
+    debugDraw() {
+        for (const entity of this.entities)
+            entity.displayHitbox?.();
+    }
+    buildMesh(mesh) {
+
+        let v = 0;
+        let u = 0;
+
+        for (const entity of this.entities) {
+
+            this.vertexBuffer.set(entity.vertices, v);
+            this.uvBuffer.set(entity.uvs, u);
+
+            v += entity.vertices.length;
+            u += entity.uvs.length;
+        }
+
+        this.vertexCount = v;
+        this.uvCount = u;
+
+        mesh.setAttribute("coordinates", this.vertexBuffer.subarray(0, v));
+
+        mesh.setAttribute("uv", this.uvBuffer.subarray(0, u));
+    }
+} 
+const EntityUV = {
+    ArachnidBoss: [{ x: 0, y: 0, z: -0.5 }, { x: 136, y: 0, z: 0 }, { x: 121, y: 0, z: 0 }, { x: 136, y: 0, z: 0 }, { x: 121, y: 0, z: 0 }, { x: 136, y: 0, z: 0 }, { x: 121, y: 0, z: 0 }, { x: 136, y: 0, z: 0 }, { x: 121, y: 0, z: 0 }, { x: 136, y: 0, z: -1 }, { x: 121, y: 0, z: -1 }, { x: 136, y: 0, z: -1 }, { x: 121, y: 0, z: -1 }, { x: 136, y: 0, z: -1 }, { x: 121, y: 0, z: -1 }, { x: 136, y: 0, z: -1 }, { x: 121, y: 0, z: -1 }, ],
+    Humanoid: [{ x: 0, y: 0, z: 0 }, { x: 53, y: 0, z: -1 }, { x: 84, y: 0, z: 1 }, { x: 52, y: 34, z: -0.5 }, { x: 83, y: 34, z: 0.95 }, { x: 48, y: 66, z: 0.1 }, { x: 78, y: 66, z: 0.2 }, { x: 48, y: 103, z: 0.8 }, { x: 78, y: 103, z: 0.9 }, ]
+
+};
+
+
+class Weapon {
+    constructor(owner, node1, node2, x, y, w, h, name) {
+        this.name = name;
+        this.owner = owner;
+        this.nodeP = node1;
+        this.nodeA = node2;
+        this.x = x;
+        this.y = y;
+        this.w = w;
+        this.h = h;
+        this.angle = Math.PI / 2-0.5+ Math.random() * 0.1
+        this.z = this.owner.z - 0.0005;
+        this.refPoints = [{
+                x: this.x,
+                y: this.y
+            },
+            {
+                x: this.x + w,
+                y: this.y
+            },
+            {
+                x: this.x + w,
+                y: this.y + h
+            },
+            {
+                x: this.x,
+                y: this.y + h
+            },
+        ];
+        const cx = this.x + w / 2;
+        const cy = this.y + h / 2;
+        const c = Math.cos(this.angle);
+        const s = Math.sin(this.angle);
+        for (const p of this.refPoints) {
+            const x = p.x - cx;
+            const y = p.y - cy;
+
+            p.x = cx + x * c - y * s;
+            p.y = cy + x * s + y * c;
+        }
+        this.vertices = new Float32Array(18);
+        this.uvs = new Float32Array(18);
+        this.assignUvs();
+    }
+    assignUvs() {
+        let uvt = [{
+            x: 0,
+            y: 0
+        }, {
+            x: this.w,
+            y: 0
+        }, {
+            x: this.w,
+            y: this.h
+        }, {
+            x: 0,
+            y: this.h
+        }]
+        for (var i = 0; i < 6; i++) {
+            let newCoord = entityAtlas.getUV(
+                this.name,
+                uvt[triOrder[i]].x,
+                uvt[triOrder[i]].y,
+            );
+            this.uvs[i * 3] = newCoord.x;
+            this.uvs[i * 3 + 1] = newCoord.y;
+            this.uvs[i * 3 + 2] = this.z;
+        }
+    }
+    displayHitbox() {
+
+        glparticles.add(this.vertices[0], this.vertices[1], 0.99, 0, 1, 1, 1);
+        glparticles.add(this.vertices[3], this.vertices[4], 0.99, 0, 1, 1, 1);
+        glparticles.add(this.vertices[6], this.vertices[7], 0.99, 0, 1, 1, 1);
+        glparticles.add(this.vertices[9], this.vertices[10], 0.99, 0, 1, 1, 1);
+    }
+    constructVertexArray() {
+
+        for (var i = 0; i < 6; i++) {
+            //(init,curr,ic,c,p)
+            PhysUtils.rotateFromReference(
+                point,
+                this.owner.templateNodes[this.nodeP],
+                this.owner.nodes[this.nodeP],
+                this.owner.templateNodes[this.nodeA],
+                this.owner.nodes[this.nodeA],
+                this.refPoints[triOrder[i]],
+                this.owner.facing,
+            );
+
+            this.vertices[i * 3] = point.x / 2;
+            this.vertices[i * 3 + 1] = point.y / 2;
+            this.vertices[i * 3 + 2] = this.z;
+
+        }
+    }
+}
+class Attack{
+constructor(source){
+this.source=source;
+}
+update(){
+console.warn("No update function for Attack from" + this.source.constructor.name);
+}
+render(){
+console.warn("No render function for Attack from" + this.source.constructor.name);
+}
+}
+class ProjectileAttack extends Attack{
+    static renderFuncs={
+        web:function(thi){
+
+        }
+    }
+    static damages={
+        web:10,
+
+    }
+constructor(source,type){
+super(source);
+this.pos={x:0,y:0};
+this.vel={x:0,y:0};
+
+}
+}
+class MeleeAttack extends Attack{
+constructor(source,type){
+super(source);
+this.pos={x:0,y:0};
+this.vel={x:0,y:0};
+
+}
+}
+//Much much different from an enemy attack, so nothing inherited.
 class PlayerAttack {
     static bigrams = {
             NN: { x: 0, y: 90, tilt: 0,mult:0.7},
@@ -2971,216 +3217,7 @@ return poses[index-1];
     }
 }
 
-class ArachnidBoss extends Entity {
-    constructor(x, y, z, name) {
-        let previewNodes = [
-            new Node(0, 100, "root", { x: 0, y: -1 }, [], "bodyRoot"),
-            new Node(0, 120, "root", { x: 0, y: -1 }, [], "bodyTap"),
-            new Node(-56, 72, "root", { x: 0, y: -1 }, [], "legR1"),
-            new Node(-56, 48, "child", { x: 0, y: -1 }, [2, 4], "kneeR1"),
-            new Node(-56, 8, "root", { x: 0, y: -1 }, [], "footR1"),
-            new Node(-52, 72, "root", { x: 0, y: -1 }, [], "legR2"),
-            new Node(-52, 48, "child", { x: 0, y: -1 }, [5, 7], "kneeR2"),
-            new Node(-52, 8, "root", { x: 0, y: -1 }, [], "footR2"),
-            new Node(-48, 72, "root", { x: 0, y: -1 }, [], "legR3"),
-            new Node(-48, 48, "child", { x: 0, y: -1 }, [8, 10], "kneeR3"),
-            new Node(-48, 8, "root", { x: 0, y: -1 }, [], "footR3"),
-            new Node(-44, 72, "root", { x: 0, y: -1 }, [], "legR4"),
-            new Node(-44, 48, "child", { x: 0, y: -1 }, [11, 13], "kneeR4"),
-            new Node(-44, 8, "root", { x: 0, y: -1 }, [], "footR4"),
-            new Node(56, 72, "root", { x: 0, y: -1 }, [], "legL1"),
-            new Node(56, 48, "child", { x: 0, y: -1 }, [14, 16], "kneeL1"),
-            new Node(56, 8, "root", { x: 0, y: -1 }, [], "footL1"),
-            new Node(52, 72, "root", { x: 0, y: -1 }, [], "legL2"),
-            new Node(52, 48, "child", { x: 0, y: -1 }, [17, 19], "kneeL2"),
-            new Node(52, 8, "root", { x: 0, y: -1 }, [], "footL2"),
-            new Node(48, 72, "root", { x: 0, y: -1 }, [], "legL3"),
-            new Node(48, 48, "child", { x: 0, y: -1 }, [20, 22], "kneeL3"),
-            new Node(48, 8, "root", { x: 0, y: -1 }, [], "footL3"),
-            new Node(44, 72, "root", { x: 0, y: -1 }, [], "legL4"),
-            new Node(44, 48, "child", { x: 0, y: -1 }, [23, 25], "kneeL4"),
-            new Node(44, 8, "root", { x: 0, y: -1 }, [], "footL4")
-        ];
 
-        let previewLimbs = [
-            new Limb(-60, 64, 120, 104, [0, 1, 2, 5, 8, 11, 14, 17, 20, 23], "body"),
-            new Limb(-64, 40, 16, 40, [2, 3], "legL1"),
-            new Limb(-64, 0, 16, 56, [3, 4], "footR1"),
-            new Limb(-60, 40, 16, 40, [5, 6], "legR2"),
-            new Limb(-60, 0, 16, 56, [6, 7], "footR2"),
-            new Limb(-56, 40, 16, 40, [8, 9], "legR3"),
-            new Limb(-56, 0, 16, 56, [9, 10], "footR3"),
-            new Limb(-52, 40, 16, 40, [11, 12], "legR4"),
-            new Limb(-52, 0, 16, 56, [12, 13], "footR4"),
-            new Limb(48, 40, 16, 40, [14, 15], "legL1"),
-            new Limb(48, 0, 16, 56, [15, 16], "footL1"),
-            new Limb(44, 40, 16, 40, [17, 18], "legL2"),
-            new Limb(44, 0, 16, 56, [18, 19], "footL2"),
-            new Limb(40, 40, 16, 40, [20, 21], "legL3"),
-            new Limb(40, 0, 16, 56, [21, 22], "footL3"),
-            new Limb(36, 40, 16, 40, [23, 24], "legL4"),
-            new Limb(36, 0, 16, 56, [24, 25], "footL4")
-        ];
-        super(previewNodes, previewLimbs, z, name);
-        this.translate(x, y);
-        this.assignUvs(EntityUV.ArachnidBoss, 1);
-
-        //███████████ Add all limb ends here!!
-        let endNodes = ["footR1", "footR2", "footR3", "footR4", "footL1", "footL2", "footL3", "footL4"];
-        this.ends = [];
-        for (var i = 0; i < this.nodes.length; i++) {
-            let node = this.nodes[i];
-            if (endNodes.includes(node.name)) {
-                node.xv = 0;
-                node.yv = 0;
-                this.ends.push(i);
-            }
-        }
-        //███████████ Init limbs accordingly
-        this.hitbox.h -= 20;
-        for (var i = 0; i < 8; i++) {
-            this.pickInitFunction("leg")(this, i * 3 + 4);
-        }
-        this.hitbox.hh = this.hitbox.h;
-        this.tic = 0;
-    }
-    displayHitbox() {
-        let hb = this.hitbox;
-
-        glparticles.add(hb.x, hb.y, 0.99, 0, 1, 1, 1);
-        glparticles.add(hb.x + hb.w, hb.y, 0.99, 0, 1, 1, 1);
-        glparticles.add(hb.x + hb.w, hb.y + hb.h, 0.99, 0, 1, 1, 1);
-        glparticles.add(hb.x, hb.y + hb.hh, 0.99, 0, 1, 1, 1);
-
-    }
-    updateHitbox() {
-        this.hitbox.onGround = false;
-        this.hitbox.yv -= 0.2;
-        if (Math.abs(this.hitbox.xv) > Math.abs(this.hitbox.yv)) {
-            this.solveAxis(this.hitbox.xv, 0, level);
-            this.solveAxis(0, this.hitbox.yv, level);
-        } else {
-            this.solveAxis(0, this.hitbox.yv, level);
-            this.solveAxis(this.hitbox.xv, 0, level);
-        }
-
-        //███████████ Tune physics and position body center. this code bro.
-        this.hitbox.xv *= this.hitbox.onGround ? 0.92 : 0.98;
-        this.hitbox.yv *= 0.99;
-        this.nodes[0].x = this.hitbox.cx * 2;
-        this.nodes[0].y = (this.hitbox.y + this.hitbox.hh * 0.5) * 2 + 2;
-        this.nodes[1].x = this.hitbox.cx * 2 + this.hitbox.xv;
-        this.nodes[1].y = (this.hitbox.y + this.hitbox.hh * 0.5) * 2 + 10;
-    }
-    //███████████ Main changes
-    static updateFunctions = {
-        normalMovement: {
-            leg(thi, ind) {
-                let curNode = thi.nodes[ind];
-                curNode.r = thi.hitbox.hh - 1;
-                curNode.tx += thi.hitbox.xv * 0.7 * (1 - Math.abs(thi.hitbox.ptotalv - thi.hitbox.totalv) * 1.5);
-                curNode.c = {
-                    x: thi.nodes[ind - 2].x,
-                    y: thi.nodes[ind - 2].y
-                };
-
-                PhysUtils.parentRefVector(thi.nodes[ind - 1].desiredVector, thi.nodes[ind - 1], {
-                    x: 0,
-                    y: ind < 14 ? -1 : 1
-                });
-
-
-                PhysUtils.springPhys(
-                    curNode,
-                    curNode.tx,
-                    curNode.ty - thi.hitbox.yv * 1,
-                    0.01 + Math.abs(thi.hitbox.xv) * 0.015 + Math.abs(thi.hitbox.yv * 0.01),
-                    0.85,
-                );
-
-            },
-        },
-    };
-    pickUpdateFunction(name, action) {
-
-        return ArachnidBoss.updateFunctions[action][name];
-    }
-    //███████████ Mainish changes
-    static initFunctions = {
-        leg(thi, ind) {
-            let curNode = thi.nodes[ind];
-            curNode.tx = curNode.x;
-            curNode.ty = curNode.y;
-            curNode.offsetX = ind * 16 - 218;
-            curNode.offsetY = -64;
-            curNode.c = {
-                x: thi.nodes[ind - 2].x,
-                y: thi.nodes[ind - 2].y
-            };
-            curNode.r = Math.hypot(curNode.x - curNode.c.x, curNode.y - curNode.c.y) - 0.1;
-        },
-    };
-    pickInitFunction(name) {
-        return ArachnidBoss.initFunctions[name];
-    }
-    orientLimbs() {
-
-        for (var i = 0; i < this.limbs.length; i++) {
-            let limb = this.limbs[i];
-            for (var j = 0; j < limb.nodes.length; j++) {
-                let node = this.nodes[limb.nodes[j]];
-
-                if (node.type == "root" && j > 1) {
-                    PhysUtils.rotateFromReference(
-                        point,
-                        this.templateNodes[limb.nodes[1]],
-                        this.nodes[limb.nodes[1]],
-                        this.templateNodes[limb.nodes[0]],
-                        this.nodes[limb.nodes[0]],
-                        this.templateNodes[limb.nodes[j]],
-                        this.facing,
-                    );
-
-                    node.x = point.x;
-                    node.y = point.y;
-                }
-            }
-        }
-    }
-    updateNodes() {
-
-        //PhysUtils.springPhys(body, tx, ty, strength, damping)
-
-        this.hitbox.ptotalv = this.hitbox.totalv;
-        this.hitbox.totalv = Math.hypot(this.hitbox.xv, this.hitbox.yv);
-
-        //███████████ Find something better
-        this.updateFeet([this.nodes[4], this.nodes[7], this.nodes[10], this.nodes[13], this.nodes[16], this.nodes[19], this.nodes[22], this.nodes[25]], 60 + Math.abs(this.hitbox.xv) * 14, );
-
-        //███████████ Run tilt and fake hitbox
-        this.hitbox.ht = 64 - Math.abs(this.hitbox.xv) * 2 + Math.min(this.hitbox.yv, 0) * 4;
-        this.hitbox.hh -= (this.hitbox.hh - this.hitbox.ht) / 8.0;
-        this.hitbox.hh = Math.max(this.hitbox.hh, 58);
-    
-        this.orientLimbs(); 
-
-        //███████████ Change
-        for (var i = 0; i < 8; i++) {
-            this.pickUpdateFunction("leg", "normalMovement")(this, i * 3 + 4);
-        }
-
-
-
-        for (var i = 0; i < this.ends.length; i++) {
-            let node = this.nodes[this.ends[i]];
-            PhysUtils.solveEnds(node, node.c, node.r);
-        }
-        for (var i = 0; i < this.nodes.length; i++) {
-            this.nodes[i].solve();
-        }
-
-    }
-}
 class Particle {
     constructor(x, y, z, xv, yv, type) {
         this.x = x;
@@ -3225,6 +3262,8 @@ class Particle {
         }
     };
 }
+
+
 class Inventory{
     constructor(size){
         this.items=new Array(size);
@@ -3245,6 +3284,7 @@ class Item {
     } 
 }
 
+
 class TileSet {
     constructor() {
         this.tiles = {};
@@ -3256,17 +3296,50 @@ class TileSet {
     get(char) {
         return this.tiles[char];
     }
-}
+    addHitEvent(char, func){
+    this.tiles[char].onHit=func;
+    }
+} 
 class Level {
     static tileSize = 64; 
-
-    constructor(name, slices, colliders = {}) {
+    static changeRoom(ind){
+    const via=world.level.zones.vias[ind];
+ 
+    const ta = via.destination;
+    const s= world.levels[ta].ground;
+   
+    let found=false;
+    for (let row = 0; row < s.data.length; row++) {
+        for (let col = 0; col < s.data[row].length; col++) {
+            if (s.data[row][col] === ind) {
+                const tx = col + s.x;
+                const ty = s.data.length - row - 1 + s.y;
+                point.x=(tx + 0.5) * Level.tileSize;
+                point.y=(ty + 0.5) * Level.tileSize;
+                found=point;
+            }
+        }
+    } 
+ 
+    if(!Player.pinRoomTransition){
+         world.levelInd=ta;
+    world.updateMesh();
+    Player.entity.hitbox.y=found.y/2-Player.entity.hitbox.h*0.5+via.off.y/2;
+    Player.entity.hitbox.yv=0;
+    Player.entity.hitbox.x=found.x/2-Player.entity.hitbox.w*0.5+via.off.x/2;
+    Player.entity.hitbox.xv=0;
+    }
+    
+    Player.inRoomTransition=true;
+    }
+    constructor(name, slices,tileset,zones={}) {
         this.name = name;
         this.slices = slices;
+        this.tileset=tileset;
         this.slices = this.slices.sort((a, b) => b.z - a.z);
-        this.zones = colliders;
         this.ground = this.slices.find((s) => s.z == 1);
-        this.colliders = this.ground.colliders;
+        this.zones=zones;
+        this.colliders=this.ground.colliders;
     }
     get(x, y, z) {
         return this.slices[z].data[y][x];
@@ -3287,13 +3360,13 @@ class Level {
         const tile = s.data[s.data.length - ty - 1][tx];
         return this.colliders[tile] ?? null;
     }
-    rectCollision(box) {
+    rectCollision(box) { 
         const s = this.ground;
         const tile = Level.tileSize * 0.5;
-
+ 
         const tx0 = Math.floor(box.x / tile - s.x);
         const ty0 = Math.floor(box.y / tile - s.y);
-
+ 
         const tx1 = Math.floor((box.x + box.w - 0.001) / tile - s.x);
         const ty1 = Math.floor((box.y + box.h - 0.001) / tile - s.y);
 
@@ -3305,7 +3378,8 @@ class Level {
 
                 const tileId = s.data[s.data.length - ty - 1][tx];
                 const collider = this.colliders[tileId];
-
+               
+                this.tileset.get(tileId)?.onHit?.(tileId);
                 if (collider) {
                     return collider;
                 }
@@ -3371,7 +3445,8 @@ class Level {
             }
         }
     }
-    buildMesh(tileSet) {
+    buildMesh() {
+    let tileSet=this.tileset;
         const vb = [];
         const ub = [];
         for (let z = 0; z < this.slices.length; z++) {
@@ -3402,8 +3477,267 @@ class Level {
         };
     }
 }
-//Muahahahhahaa formatting.  Looks stupid but works cause js doesn't care what you do apparently.
-const tiles = new TileSet()
+class World{
+constructor(player,levels){
+this.player=player;
+this.levels=levels;
+this.levelInd=Object.keys(levels)[0];
+this.roomAssets={};
+this.currentTilemap;
+this.currentTilemapNormal
+}
+get level(){
+return this.levels[this.levelInd];
+}
+addTilemaps(name,pair){
+this.roomAssets[name]=pair;
+}
+updateMesh(){
+let lev=this.level;
+const meshData = lev.buildMesh();
+
+worldMesh.setAttribute("coordinates", meshData.coordinates);
+worldMesh.setAttribute("uv", meshData.uv);
+let pair=this.roomAssets[lev.name] ?? [null,null];
+this.currentTilemap=pair[0];
+this.currentTilemapNormal=pair[1];
+}
+}
+
+class Camera {
+    constructor(target = null) {
+        this.x = 0;
+        this.y = 0;
+        this.z = 0;
+
+        this.xv = 0;
+        this.yv = 0;
+
+        this.shx = 0;
+        this.shy = 0;
+        this.shstr=0;
+
+        this.target = target;
+
+        this.strength = 0.6;
+        this.damping = 0.5;
+    }
+
+    follow(target) {
+        this.target = target;
+        return this;
+    }
+    update() {
+        if (!this.target) return;
+        PhysUtils.springPhys(
+            this,
+            this.target.cx,
+            this.target.cy,
+            this.strength,
+            this.damping,
+        );
+        let plr=Player.entity.hitbox;
+        if(plr.onGround&&Math.abs(plr.totalv-plr.ptotalv)>4){
+            this.shstr+=Math.abs(plr.totalv-plr.ptotalv)*0.6;
+        }
+        this.shx+=(Math.random()-0.5)*this.shstr;
+        this.shy+=(Math.random()-0.5)*this.shstr;
+        this.shx/=1.1;
+        this.shy/=1.1;
+        this.shstr/=1.1;
+    
+        this.x = Math.smoothMax(Math.smoothMin(this.x, world.level.width * 32 - 160, 32), 160, 32)+this.shx;
+        this.y = Math.smoothMax(Math.smoothMin(this.y, world.level.height * 32 - 90, 32), 90, 32)+this.shy;
+    }
+    snap() {
+        if (!this.target) return; 
+        this.x = this.target.cx;
+        this.y = this.target.cy;
+        this.xv = 0;
+        this.yv = 0;
+    }
+} 
+
+
+await loadScripts();
+const c = document.getElementById("m"), ctx = c.getContext("2d");
+
+ctx.imageSmoothingEnabled = false;
+const BASE_W = 640;
+const BASE_H = 360;
+const gameCanvas=new OffscreenCanvas(BASE_W,BASE_H);
+const gctx=gameCanvas.getContext("2d");
+gctx.imageSmoothingEnabled = false;
+
+function resizeCanvas() {
+    const maxScale = Math.min(
+        window.innerWidth / BASE_W,
+        window.innerHeight / BASE_H
+    );
+
+    // Snap to half-integer scales to reduce moire or whatever its called
+    const scale = Math.max(0.5, Math.floor(maxScale * 4) / 4);
+
+    c.style.width = `${BASE_W * scale}px`;
+    c.style.height = `${BASE_H * scale}px`;
+}
+
+window.addEventListener("resize", resizeCanvas);
+resizeCanvas();
+
+
+const input = new Input(document.getElementById("m"));
+
+const triOrder = [0, 1, 2, 0, 2, 3];
+
+
+
+
+
+const defaultUITheme = {
+    colors: {
+        background: "rgb(0,0,0)",
+        panel: "rgb(30,40,50,0.1)",
+        border: "#606579",
+        text: "#334422",
+        muted: "#aaaab7",
+        button: "#343747",
+        focus: "#b8a0ff",
+        buttonHover: "#484c61",
+        buttonPressed: "#252735"
+    },
+
+    fonts: {
+        title: '36px "Gravitas One"',
+        body: '26px "IM Fell DW Pica"',
+        small: '12px "IM Fell DW Pica"'
+    },
+
+    borders: {
+        panel: 1,
+        button: 1
+    }
+};
+
+
+/*
+if(window.parent.gfx==undefined){
+window.parent.gfx=new GLContext(new OffscreenCanvas(640, 360),{premultipliedAlpha: false});
+}
+
+
+let gfx=window.parent.gfx;
+*/
+//GL{
+let gfx = new GLContext(new OffscreenCanvas(640, 360), {
+    premultipliedAlpha: false,
+});
+const gl = gfx.gl;
+gl.getExtension("EXT_color_buffer_float");
+
+const mainProgram = gfx.createProgram({
+    vertex: document.getElementById("vertex-shader").textContent,
+    fragment: document.getElementById("fragment-shader").textContent,
+});
+gl.useProgram(mainProgram.program);
+
+const camMat = mainProgram.uniform("camera");
+const glLights = mainProgram.uniform("lightPos");
+const iTime = mainProgram.uniform("iTime");
+const iChannel0 = mainProgram.uniform("iChannel0");
+const iChannel1 = mainProgram.uniform("iChannel1");
+
+gl.uniform1i(iChannel0, 0);
+gl.uniform1i(iChannel1, 1);
+
+const atlas = gfx.createTexture(noTexTex, {
+    minFilter: gl.NEAREST,
+    magFilter: gl.NEAREST,
+    mipmap: false,
+});
+const atlasNormals = gfx.createTexture(noTexTex, {
+    minFilter: gl.NEAREST,
+    magFilter: gl.NEAREST,
+    mipmap: false,
+});
+
+
+atlas.bind(0);
+atlasNormals.bind(1);
+const particleProgram = gfx.createProgram({
+    vertex: document.getElementById("particle-vertex").textContent,
+    fragment: document.getElementById("particle-fragment").textContent,
+});
+const camMatp = particleProgram.uniform("camera");
+const worldMesh = gfx.createMesh({
+    dynamic: false,
+    attributes: {
+        coordinates: {
+            size: 3,
+            data: []
+        },
+        uv: {
+            size: 3,
+            data: []
+        }
+    },
+});
+const entitiesMesh = gfx.createMesh({
+    dynamic: true,
+    attributes: {
+        coordinates: {
+            size: 3,
+            data: []
+        },
+        uv: {
+            size: 3,
+            data: []
+        }
+    },
+});
+const sceneTarget = gfx.createRenderTarget({
+    format: gl.RGBA16F
+});
+const ping = gfx.createRenderTarget();
+const pong = gfx.createRenderTarget();
+const bloomPass = gfx.createPostProcess({
+    vertex: document.getElementById("ppfxDefault").textContent,
+    fragment: document.getElementById("bloom-shader").textContent,
+});
+const boringPass = gfx.createPostProcess({
+    vertex: document.getElementById("ppfxDefault").textContent,
+    fragment: document.getElementById("boring-shader").textContent,
+});
+const compPass = gfx.createPostProcess({
+    vertex: document.getElementById("ppfxDefault").textContent,
+    fragment: document.getElementById("composite-shader").textContent,
+});
+const impactFrame = compPass.program.uniform("impactFrame");
+const posBuffer = gl.createBuffer();
+const uvBuffer = gl.createBuffer();
+
+//}
+
+gl.enable(gl.BLEND);
+gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+//gl.enable(gl.DEPTH_TEST);
+
+//gl.depthMask(false)
+gl.viewport(0, 0, 640, 360);
+gl.clearColor(0, 0, 0, 1);
+
+let glparticles = new GLParticles(gl);
+
+
+
+
+
+
+
+//Muahahahhahaa formatting.  Looks stupid but works cause js is built different.
+const tiles1 = new TileSet()
+    .define("0", { x: -64, y: -64, w: 64, h: 64 })
     .define("a", { x: 64, y: 64, w: 64, h: 64 })
     .define("b", { x: 128, y: 64, w: 64, h: 64 })
     .define("c", { x: 128, y: 0, w: 64, h: 64 })
@@ -3418,6 +3752,24 @@ const tiles = new TileSet()
     .define("l", { x: 256, y: 0, w: 64, h: 64 })
     .define("m", { x: 256, y: 64, w: 64, h: 64 })
     .define("n", { x: 256, y: 128, w: 64, h: 64 })
+tiles1.addHitEvent("0",Level.changeRoom);
+const tiles2 = new TileSet()
+    .define("0", { x: -64, y: -64, w: 64, h: 64 })
+    .define("a", { x: 320, y: 0, w: 64, h: 64 })
+    .define("b", { x: 384, y: 64, w: 64, h: 64 })
+    .define("c", { x: 256, y: 64, w: 64, h: 64 })
+    .define("d", { x: 320, y: 128, w: 64, h: 64 })
+    .define("e", { x: 576, y: 0, w: 64, h: 128 })
+    .define("f", { x: 640, y: 0, w: 128, h: 64 })
+    .define("g", { x: 0, y: 0, w: 256, h: 256 })
+    .define("h", { x: 6, y: 128, w: 64, h: 64 })
+    .define("i", { x: 128, y: 128, w: 64, h: 64 })
+    .define("j", { x: 128 + 64, y: 0, w: 64, h: 64 })
+    .define("k", { x: 128 + 64, y: 64, w: 64, h: 64 })
+    .define("l", { x: 448, y: 0, w: 128, h: 128 })
+    .define("m", { x: 256, y: 64, w: 64, h: 64 })
+    .define("n", { x: 640, y: 64, w: 64, h: 64 })
+tiles2.addHitEvent("0",Level.changeRoom);
 
 const levelData = [{
         x: 0,
@@ -3437,12 +3789,12 @@ const levelData = [{
         y: 0,
         z: 1,
         data: [
-            "hi  ghhhhhhhhhhhhhhhhhhhhhhhhhhhhhha",
+            "hi0 ghhhhhhhhhhhhhhhhhhhhhhhhhhhhhha",
             "b         faab                     f",
             "b         ghhi                     g",
             "b                                   ",
-            "b                                   ",
-            "adddddddddddddadddaadddaadddddadaadd",
+            "addd                                ",
+            "aaaaddddddddddadddaadddaadddddadaadd",
         ],
         colliders: {
             a: true,
@@ -3519,146 +3871,127 @@ const levelData = [{
         ],
     },
 ];
-
-const level = new Level("test room", levelData, {
-    lights: new Float32Array([527, 147, 1.25, 526 + 256, 147, 0.75, 526 + 512, 147, 1.25])
+const levelData2 = [
+    {
+        x: 0,
+        y: 0,
+        z: 1,
+        data: [
+            "ddddddddddddddddddddddddddddd",
+            "   f n  f    f    f    c    c",
+            "     n                 c    c",
+            "     n                      c",
+            "     ne                     c",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaa0aa",
+        ], 
+        colliders: {
+            a: true,
+            b: true,
+            c: true,
+            d: true,
+            e: true,
+            n: true,
+        },
+    },
+ 
+    {
+        x: -2,
+        y: -1,
+        z: 1.5,
+        data: [
+            "l l l l l l l l l l l l lcl l l l",
+            "                         c ",
+            "l l l l l l l l l l l l lcl l l l",
+            "                         c",
+            "l l l l l l l l l l     lcl l l l",
+            "                         c",
+            "l l l l l l l l l l g   lcl l l l",
+            "                         c",
+            "l l l l l l l l l l l l lcl l l l",
+        ],
+    },
+    {
+        x: -1,
+        y: -1,
+        z: 1.25, 
+        data: [
+            "                                    ",
+            "ddddddddddddddddddddddddddddddd",
+            "    f    f    f    f    c            ",
+            "                        c           ",
+            "                        c            ",
+            "                        c           ",
+            "                        c           ",
+            "                        c           ",
+        ],
+    },
+     {
+        x: 0,
+        y: -1,
+        z: 0.75, 
+        data: [
+            "                                    ",
+            "ddddddddddddddddddddddddddddddd",
+            "   f    f    f    f    c            ",
+            "                       c            ",
+            "                       c            ",
+            "                       c            ",
+            "                       c            ",
+            "                       c            ",
+        ],
+    },
+]; 
+let level = new Level("room_1", levelData,tiles1, {
+    lights: new Float32Array([527, 147, 1.25, 526 + 256, 147, 0.75, 526 + 512, 147, 1.25]),
+    vias:{"0":{destination:"bank",off:{x:-64,y:65}}}
+});
+const level2 = new Level("bank", levelData2,tiles2, {
+    lights: new Float32Array([130, 147, 0.95, 130 + 158, 147, 0.95, 130+158*2, 147, 0.95, 130+158*3, 147, 0.95]),
+    vias:{"0":{destination:"room_1",off:{x:64,y:0}}}
 });
 
-const meshData = level.buildMesh(tiles);
-
-worldMesh.setAttribute("coordinates", meshData.coordinates);
-worldMesh.setAttribute("uv", meshData.uv);
-
-class Camera {
-    constructor(target = null) {
-        this.x = 0;
-        this.y = 0;
-        this.z = 0;
-
-        this.xv = 0;
-        this.yv = 0;
-
-        this.shx = 0;
-        this.shy = 0;
-        this.shstr=0;
-
-        this.target = target;
-
-        this.strength = 0.6;
-        this.damping = 0.5;
-    }
-
-    follow(target) {
-        this.target = target;
-        return this;
-    }
-    update() {
-        if (!this.target) return;
-        PhysUtils.springPhys(
-            this,
-            this.target.cx,
-            this.target.cy,
-            this.strength,
-            this.damping,
-        );
-        let plr=Player.entity.hitbox;
-        if(plr.onGround&&Math.abs(plr.totalv-plr.ptotalv)>4){
-            this.shstr+=Math.abs(plr.totalv-plr.ptotalv)*0.6;
-        }
-        this.shx+=(Math.random()-0.5)*this.shstr;
-        this.shy+=(Math.random()-0.5)*this.shstr;
-        this.shx/=1.1;
-        this.shy/=1.1;
-        this.shstr/=1.1;
-    
-        this.x = Math.smoothMax(Math.smoothMin(this.x, level.width * 32 - 160, 32), 160, 32)+this.shx;
-        this.y = Math.smoothMax(Math.smoothMin(this.y, level.height * 32 - 90, 32), 90, 32)+this.shy;
-    }
-    snap() {
-        if (!this.target) return; 
-        this.x = this.target.cx;
-        this.y = this.target.cy;
-        this.xv = 0;
-        this.yv = 0;
-    }
-} 
-class EntityHandler { 
-    constructor(maxSize = 15300) {
-        this.entities = [];
-        this.vertexBuffer = new Float32Array(maxSize);
-        this.uvBuffer = new Float32Array(maxSize);
-
-        this.vertexCount = 0;
-        this.uvCount = 0;
-    }
-    add(entity) {
-        this.entities.push(entity);
-        return entity;
-    }
-    update() {
-        for (const entity of this.entities) {
-            entity.updateHitbox?.();
-            entity.updateNodes?.();
-            entity.constructVertexArray();
-        }
-    }
-    debugDraw() {
-        for (const entity of this.entities)
-            entity.displayHitbox?.();
-    }
-    buildMesh(mesh) {
-
-        let v = 0;
-        let u = 0;
-
-        for (const entity of this.entities) {
-
-            this.vertexBuffer.set(entity.vertices, v);
-            this.uvBuffer.set(entity.uvs, u);
-
-            v += entity.vertices.length;
-            u += entity.uvs.length;
-        }
-
-        this.vertexCount = v;
-        this.uvCount = u;
-
-        mesh.setAttribute("coordinates", this.vertexBuffer.subarray(0, v));
-
-        mesh.setAttribute("uv", this.uvBuffer.subarray(0, u));
-    }
-}
+ 
 
 let entityHandler = new EntityHandler();
-entityHandler.add(new Humanoid(64, 128, 1.001, "player"));
+entityHandler.add(new Humanoid(256, 32, 1.001, "player"));
 for (var i = 0; i < 1; i++) {
-    entityHandler.add(new ArachnidBoss(828, 64, 1.0018, "spider"));
+    entityHandler.add(new ArachnidBoss(318, 64, 1.0018, "spider"));
 }
-
 
 let Player = {};
 Player.entity = entityHandler.entities[0];
 Player.attack=new PlayerAttack(Player.entity);
-
 Player.update=function(){
   if (input.up() && Player.entity.hitbox.onGround) {
-            Player.entity.hitbox.yv = 4.4;
+            Player.entity.hitbox.yv = 4.2;
         }
         
-            Player.entity.hitbox.xv += (Player.entity.hitbox.onGround ? 0.22 : 0.09)*input.ls.x;
+            Player.entity.hitbox.xv += (Player.entity.hitbox.onGround ? 0.19 : 0.07)*input.ls.x;
             
         Player.attack.update();
    
 }
-
+Player.inRoomTransition=false;
+Player.pinRoomTransition=false;
 //(owner,node1,node2, x,y,w,h)
 Player.sword = new Weapon(Player.entity, 6, 4, 0, 1, 32, 64, "rustySword");
 entityHandler.add(Player.sword);
+
+const levelsCondensed = [level,level2].reduce((accumulator, currentObject) => {
+  // Use the name property as the key, and set its value to the current object
+  accumulator[currentObject.name] = currentObject;
+  return accumulator;
+}, {});
+let world=new World(Player,levelsCondensed)
+world.addTilemaps("room_1",[await atlas.setImage(room_1_tilemap),await atlasNormals.setImage(room_1_tilemap_normal)])
+world.addTilemaps("bank",[await atlas.setImage(bank_tilemap),await atlasNormals.setImage(bank_tilemap_normal)])
+world.levelInd="bank";
+world.updateMesh();
 let particles = [];
 
 const maxLights = 8;
 const lightUniformData = new Float32Array(maxLights * 3);
-
+ 
 const camera = new Camera(Player.entity.hitbox);
 
 var player = {
@@ -3704,8 +4037,8 @@ mainMenu.add(
         textAlign: "left",
         font: "body",
         onActivate: () => {
-
-        ui.setScreen(null);
+ 
+        ui.setScreen(gameScreen);
     }
     }),
 
@@ -3725,33 +4058,27 @@ const backArt = new UIImage({
 const root = new UIOverlay({
     width: UISize.fill(),
     height: UISize.fill()
-});
+}); 
 root.add(backArt)
 root.add(mainMenu);
+const gameScreen = new UIGameScreen({
+    gameCanvas: gameCanvas,
+    width: UISize.fill(),
+    height: UISize.fill()
+});
 
+gameScreen.add(
+    new UIButton({
+        text: "[Pause]",
+        font: "body",
+        onActivate: () => ui.pushScreen(pauseScreen)
+    })
+);
 
-ui.setScreen(root);
-ui.render();
-
-
-var frameCount = 0;
-var now;
-const frameTime = 1000 / 60;
-
-let nextFrame = performance.now();
-
-let then = performance.now();
-
-function draw(now) {
-    if (now >= nextFrame) {
-        let dt = now - then;
-        then = now;
-
-
-        nextFrame += frameTime;
-        input.updatePre();
-        ui.update(input);
-        camera.update();
+gameScreen.addUpdater((input, ui, screen) => {
+    Player.pinRoomTransition=Player.inRoomTransition;
+    Player.inRoomTransition=false;
+ camera.update();
 
         gl.useProgram(compPass.program.program);
 
@@ -3760,7 +4087,7 @@ function draw(now) {
         gl.useProgram(mainProgram.program);
         gl.uniform3fv(camMat, [camera.x, camera.y, camera.z]);
         lightUniformData.fill(0);
-        lightUniformData.set(level.zones.lights.subarray(0, lightUniformData.length));
+        lightUniformData.set(world.level.zones.lights.subarray(0, lightUniformData.length));
  
         gl.uniform3fv(glLights, lightUniformData);
         gl.uniform1f(iTime, performance.now());
@@ -3771,13 +4098,14 @@ function draw(now) {
         Player.update();
         //console.log(input.ls)
         glparticles.clear(); 
-    
+    if(world.levelInd!="bank"){
         for (var i = 0; i < 3; i++) {
-            let x = level.zones.lights[i * 3]
-            let y = level.zones.lights[i * 3 + 1]
-            let z = level.zones.lights[i * 3 + 2]
+            let x = world.level.zones.lights[i * 3]
+            let y = world.level.zones.lights[i * 3 + 1]
+            let z = world.level.zones.lights[i * 3 + 2]
             particles.push(new Particle(x, y, z, 0, 0, "normalFire"));
         }
+    }
         for (var i = 0; i < particles.length; i++) {
             let part = particles[i];
             part.update();
@@ -3786,7 +4114,7 @@ function draw(now) {
                 particles.length--;
             }
         }
-        entityHandler.debugDraw();
+        //entityHandler.debugDraw();
 
         entityHandler.update();
         entityHandler.buildMesh(entitiesMesh);
@@ -3795,8 +4123,8 @@ function draw(now) {
         sceneTarget.bind();
 
         mainProgram.use();
-        atlas.setImage(room1Tilemap);
-        atlasNormals.setImage(room1TilemapNormal);
+        atlas.setImage(world.currentTilemap);
+        atlasNormals.setImage(world.currentTilemapNormal);
         worldMesh.draw();
         atlas.setImage(entityAtlas.canvas);
         atlasNormals.setImage(entityAtlasNormal.canvas);
@@ -3829,9 +4157,34 @@ function draw(now) {
         //bloomPass.render(pong, ping); 
         compPass.render(sceneTarget, null, ping);
         ctx.fillStyle = "rgb(0,0,0)";
-        ctx.fillRect(0, 0, 600, 600);
+        gctx.fillRect(0, 0, 600, 600);
 
-        ctx.drawImage(gfx.canvas, 0, 0, 640, 360);
+        gctx.drawImage(gfx.canvas, 0, 0, 640, 360);
+});
+
+
+ui.setScreen(root);
+ui.render();
+
+
+var frameCount = 0;
+var now;
+const frameTime = 1000 / 60;
+
+let nextFrame = performance.now();
+
+let then = performance.now();
+
+function draw(now) {
+    if (now >= nextFrame) {
+        let dt = now - then;
+        then = now;
+
+
+        nextFrame += frameTime;
+        input.updatePre();
+        ui.update(input);
+       
         ui.render();
         ctx.fillStyle = "rgb(200,200,200)";
         ctx.font = "10px Jersey 10";
@@ -3847,7 +4200,7 @@ function draw(now) {
     requestAnimationFrame(draw);
 }
 
-
+ 
 for (let i = window.requestAnimationFrame(function() {}); i > 0; i--)
     window.cancelAnimationFrame(i);
 draw();
