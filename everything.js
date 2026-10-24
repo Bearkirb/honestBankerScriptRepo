@@ -40,12 +40,18 @@ class Input {
         this.mouseReleased = false;
         this.mouseDuration = 0;
 
+this.pointerIdleFrames = 0;
+this.pointerHideDelay = 120;
+this.pointerMoved = false;
+this.pointerHidden = false;
+
         this.mrc=[];
         this.pup=false;
         this.pright=false;
         this.pdown=false;
         this.pleft=false;
         this.keys = {};
+        this.keyPress={};
         this.scroll = 0;
 
         this.ls = { x: 0, y: 0 };
@@ -91,15 +97,24 @@ window.addEventListener("mouseup", event => {
 
             this.mouseY =
                 (event.clientY - rect.top) * canvas.height / rect.height;
+
+                    this.pointerIdleFrames = 0;
+    this.pointerMoved = true;
+
+    if (this.pointerHidden) {
+        canvas.style.cursor = "";
+        this.pointerHidden = false;
+    }
         });
 
         window.addEventListener("keydown", event => {
             event.preventDefault();
-            this.keys[event.key] = true;
+            this.keys[event.key.toLowerCase()] = true;
+            this.keyPress[event.key.toLowerCase()] = true;
         });
 
         window.addEventListener("keyup", event => {
-            delete this.keys[event.key];
+            delete this.keys[event.key.toLowerCase()];
         });
 
         canvas.addEventListener("wheel", event => {
@@ -117,7 +132,7 @@ window.addEventListener("mouseup", event => {
     }
 
     isKeyDown(key) {
-        return !!this.keys[key];
+        return !!this.keys[key.toLowerCase()];
     }
     updatePre() {
         const gamepads = navigator.getGamepads();
@@ -172,7 +187,21 @@ this.mouseReleased = false;
         this.pright=this.right(this.rs);
         this.pdown=this.down(this.rs);
         this.pleft=this.left(this.rs);
+        this.keyPress={};
+        if (this.pointerMoved) {
+    this.pointerIdleFrames = 0;
+    this.pointerMoved = false;
+} else {
+    this.pointerIdleFrames++;
+}
 
+if (
+    this.pointerIdleFrames >= this.pointerHideDelay &&
+    !this.pointerHidden
+) {
+    this.canvas.style.cursor = "none";
+    this.pointerHidden = true;
+}
     }
     updateGamepad(gamepad) {
         this.buttons = {};
@@ -852,7 +881,7 @@ class UILabel extends UIElement {
 
     renderer.drawText(this.text, {
         x: b.x + p.left,
-        y: b.y + p.top,
+        y: b.y + p.top+1,
         width: Math.max(0, b.width - p.left - p.right),
         height: Math.max(0, b.height - p.top - p.bottom)
     }, {
@@ -1025,15 +1054,24 @@ ctx.font = font;
         }
 
         const y = bounds.y + bounds.height / 2;
-
-        ctx.fillText(
+if(this.theme.fonts.strokeWidth){
+            ctx.lineWidth=this.theme.fonts.strokeWidth;
+            ctx.strokeStyle=this.theme.colors.strokeStyle;
+     ctx.strokeText(
             String(text),
             x,
             y,
             style.maxWidth ?? Math.max(0, bounds.width - padding * 2)
         );
     }
-}
+        ctx.fillText(
+            String(text),
+            x,
+            y,
+            style.maxWidth ?? Math.max(0, bounds.width - padding * 2)
+        );
+        
+}}
 class UIButton extends UILabel {
     constructor({
     onActivate = null,
@@ -1198,8 +1236,27 @@ class UIManager {
         this.hoveredButton = null;
         this.pressedButton = null;
         this.confirmWasDown = false;
-    }
 
+        this.shortcuts = new Map();
+    }
+    bindShortcut(key, callback) {
+    this.shortcuts.set(key.toLowerCase(), callback);
+}
+
+unbindShortcut(key) {
+    this.shortcuts.delete(key.toLowerCase());
+}
+unbindAllShortcuts() {
+    this.shortcuts.clear();
+}
+handleShortcuts(input) {
+    for (const [key, callback] of [...this.shortcuts]) {
+        if (input.keyPress[key]) {
+            callback(this, input);
+            break;
+        }
+    }
+}
     get activeScreen() {
         return this.screenStack.at(-1) ?? null;
     }
@@ -1437,6 +1494,8 @@ update(input) {
     this.confirmWasDown = confirmDown;
 
     //Do the updates if the given screen has its own.  Very nice
+    this.handleShortcuts(input);
+
     this.activeScreen?.update?.(input, this);
 }
     
@@ -1502,6 +1561,260 @@ const GFXUtils = {
     },
 }
 let noTexTex = GFXUtils.createMissingTex();
+
+//All fluid sahders, will be moved to index.html but more conveneient here rn
+const fluidVertexShader = `#version 300 es
+precision highp float;
+layout(location=0) in vec2 aPos;
+out vec2 vUv;
+void main(){
+    vUv = aPos * 0.5 + 0.5;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+`;
+
+const fluidAdvectionShader = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D iChannel0;
+uniform float dt;
+uniform float dx;
+uniform vec2 simSize;
+uniform vec4 wind[8];   // xy = position, zw = velocity
+uniform vec4 stir;      //Player specific stir.  the player is always there so he is not in wind[]
+in vec2 vUv;
+out vec4 fragColor;
+
+vec4 fetch(ivec2 c){
+    return texelFetch(iChannel0, clamp(c, ivec2(0), ivec2(simSize) - 1), 0);
+}
+vec2 velAt(vec2 pos){
+    return fetch(ivec2(floor(pos))).xy;
+}
+float curlAt(vec2 fc, float dist){
+    vec4 n = fetch(ivec2(fc) + ivec2(0, int(dist)));
+    vec4 e = fetch(ivec2(fc) + ivec2(int(dist), 0));
+    vec4 s = fetch(ivec2(fc) - ivec2(0, int(dist)));
+    vec4 w = fetch(ivec2(fc) - ivec2(int(dist), 0));
+    return (e.y - w.y - n.x + s.x) / (2.0 * dist);
+}
+void main(){
+    vec2 fc = vUv * simSize;
+    ivec2 ic = ivec2(fc);
+    vec4 o = fetch(ic);
+
+    //make sure solid cells do not get influenced
+    if (o.w < -1.0) {
+        fragColor = vec4(0.0, 0.0, 0.0, -10.0);
+        return;
+    }
+
+    //semi-lagrangian advection
+//faster and not noticably worse than rk4
+    vec2 back = fc - o.xy * dt;
+    vec4 b = fetch(ivec2(back));
+    vec2 nv = b.xy;
+    float nw = b.w;
+    // don't drag solid into air
+    if (nw < -1.0) {
+        nw = o.w;
+        nv = vec2(0.0);
+    }
+
+    //vorticity confinement
+    vec2 force = vec2(0.0);
+    for (int i = 0; i < 2; i++) {
+        float mult = exp2(float(i));
+        float oL = abs(curlAt(fc + vec2(-mult, 0.0), mult));
+        float oR = abs(curlAt(fc + vec2( mult, 0.0), mult));
+        float oB = abs(curlAt(fc + vec2(0.0,-mult), mult));
+        float oT = abs(curlAt(fc + vec2(0.0, mult), mult));
+        vec2 N = vec2(oR - oL, oT - oB) / (2.0 * mult);
+        float nl = length(N);
+        vec2 nDir = N / (nl + 0.001);
+        force += vec2(nDir.y, -nDir.x) * curlAt(fc, mult) / mult;
+    }
+    nv += force * 0.05;
+
+    //wind addition
+    for (int i = 0; i < 8; i++) {
+        if (wind[i].z == 0.0 && wind[i].w == 0.0) continue;
+        vec2 d = fc - wind[i].xy;
+        float infl = exp(-dot(d, d) / 12.0);
+        nv = mix(nv, wind[i].zw, infl * 0.2);
+        nw += (1.0 - nw) * infl * 0.05;
+    }
+
+    //player stir addition
+    {
+        vec2 d = fc - stir.xy;
+        float infl = exp(-dot(d, d) / 8.0);
+        nv = mix(nv, stir.zw, infl * 0.15);
+        nw += (1.0 - nw) * infl * 0.03;
+    }
+
+    //clamp to prevent EXPLODESSSSS
+    nv = clamp(nv, vec2(-4.0), vec2(4.0));
+
+    //Pressure relaxation
+    if (nw < 0.5) nw -= nw / 3000.0;
+    else nw += (1.0 - nw) / 3000.0;
+
+    //Boundary conds
+    if (fc.x < 2.0 || fc.x > simSize.x - 2.0 ||
+        fc.y < 2.0 || fc.y > simSize.y - 2.0) {
+        nw = -10.0;
+    }
+
+    //velocity decay
+    nv *= 0.998;
+
+    fragColor = vec4(nv, o.z, nw);
+}
+`;
+
+const fluidPressureShader = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D iChannel0;
+uniform float dx;
+uniform vec2 simSize;
+in vec2 vUv;
+out vec4 fragColor;
+
+vec4 fetch(ivec2 c){
+    return texelFetch(iChannel0, clamp(c, ivec2(0), ivec2(simSize) - 1), 0);
+}
+void main(){
+    ivec2 ic = ivec2(vUv * simSize);
+    vec4 o = fetch(ic);
+    vec4 n = fetch(ic + ivec2(0, 1));
+    vec4 e = fetch(ic + ivec2(1, 0));
+    vec4 s = fetch(ic - ivec2(0, 1));
+    vec4 w = fetch(ic - ivec2(1, 0));
+
+    float p = o.z;
+    if (o.w >= 0.0) {
+        //neumann boundary technique (check spelling?)
+        float pz = o.z;
+        float n2 = n.w >= 0.0 ? n.z : pz;
+        float e2 = e.w >= 0.0 ? e.z : pz;
+        float s2 = s.w >= 0.0 ? s.z : pz;
+        float w2 = w.w >= 0.0 ? w.z : pz;
+
+        float div = (e.x - w.x + n.y - s.y) / (1.99 * dx);
+        p = 0.25 * (n2 + e2 + s2 + w2 - dx * dx * div);
+    }
+    fragColor = vec4(o.xy, p, o.w);
+}
+`;
+
+const fluidGradientShader = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D iChannel0;
+uniform float dx;
+uniform vec2 simSize;
+in vec2 vUv;
+out vec4 fragColor;
+
+vec4 fetch(ivec2 c){
+    return texelFetch(iChannel0, clamp(c, ivec2(0), ivec2(simSize) - 1), 0);
+}
+void main(){
+    ivec2 ic = ivec2(vUv * simSize);
+    vec4 o = fetch(ic);
+    vec4 n = fetch(ic + ivec2(0, 1));
+    vec4 e = fetch(ic + ivec2(1, 0));
+    vec4 s = fetch(ic - ivec2(0, 1));
+    vec4 w = fetch(ic - ivec2(1, 0));
+
+    vec2 grad = vec2(0.0);
+    if (o.w >= 0.0) {
+        // zero gradient across solid walls
+        grad = vec2(
+            (e.w >= 0.0 ? e.z : o.z) - (w.w >= 0.0 ? w.z : o.z),
+            (n.w >= 0.0 ? n.z : o.z) - (s.w >= 0.0 ? s.z : o.z)
+        );
+        grad *= 0.5;
+    }
+    fragColor = vec4(o.xy - grad, o.z, o.w);
+}
+`;
+
+const fluidMaskShader = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D iChannel0;
+uniform vec2 simSize;
+in vec2 vUv;
+out vec4 fragColor;
+void main(){
+    float m = texelFetch(iChannel0, ivec2(vUv * simSize), 0).r;
+    fragColor = m > 0.5 ? vec4(0.0, 0.0, 0.0, -10.0) : vec4(0.0);
+}
+`;
+
+//Particles transform feedback
+const windParticleVertex = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+
+in vec4 inData;
+out vec4 outData;
+
+uniform sampler2D iChannel0;  //fluid texture
+uniform vec2 simSize;
+uniform vec2 levelSize;  // level size (px)
+uniform float dt;
+uniform vec2 spawnCenter;   //camera position for wrap
+uniform vec2 spawnRadius;   //wrap radius
+
+out float vLife;
+
+float rnd(float seed){
+    return fract(sin(seed * 12.9898) * 43758.5453);
+}
+
+void main(){
+    vec4 p = inData;
+
+    //particle recycle
+    if (p.w <= 0.0 || p.x < 0.0) {
+        // vert id seed
+        float s = float(gl_VertexID) * 0.618034 + p.x * -0.0137 + spawnCenter.x * 0.0071;
+        float ang = rnd(s) * 6.28318;
+        float rad = sqrt(rnd(s + 17.0));
+        p.x = clamp(spawnCenter.x + cos(ang) * rad * spawnRadius.x, 0.0, levelSize.x);
+        p.y = clamp(spawnCenter.y + sin(ang) * rad * spawnRadius.y, 0.0, levelSize.y);
+        p.w = 0.3 + rnd(s + 2.0) * 0.7;
+    }
+
+    // sample the fluid field
+    ivec2 tc = ivec2(p.xy / (levelSize / simSize));
+    vec4 fluid = texelFetch(iChannel0, clamp(tc, ivec2(0), ivec2(simSize) - 1), 0);
+
+    // solid cells have no wind
+    vec2 vel = fluid.w >= 0.0 ? fluid.xy : vec2(0.0);
+
+    p.xy += vel * dt * 1.2;
+    p.w -= dt * 0.006;   // slowly burn out then respawn
+
+    outData = p;
+    vLife = p.w;
+}
+`;
+
+const windParticleFragment = `#version 300 es
+precision highp float;
+in float vLife;
+out vec4 fragColor;
+void main(){
+    //particle fade in and out
+    float fade = smoothstep(0.0, 0.15, vLife) * smoothstep(1.0, 0.85, vLife);
+    fragColor = vec4(0.9, 0.92, 1.0, fade * 0.08);
+}
+`;
 class GLContext {
     constructor(canvas, attribs) {
         this.canvas = canvas;
@@ -1517,8 +1830,8 @@ class GLContext {
     createTexture(source, options = {}) {
         return new Texture(this.gl, source, options);
     }
-    createRenderTarget(options = {}) {
-        return new RenderTarget(this.gl, options);
+    createRenderTarget(options = {}, size = {}) {
+        return new RenderTarget(this.gl, options, size);
     }
     createPostProcess(shaders) {
         return new PostProcess(this.gl, this.createProgram(shaders));
@@ -1695,6 +2008,7 @@ class RenderTarget {
         } = {},
     ) {
         this.gl = gl;
+        this.mipmapped = !!options.mipmap;
         this.width = width;
         this.height = height;
         this.framebuffer = gl.createFramebuffer();
@@ -1744,14 +2058,14 @@ class RenderTarget {
     }
     bind() {
         this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.framebuffer);
-        //if(this.mipmapped){
-        gl.generateMipmap(gl.TEXTURE_2D);
-        //}
-        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        if (this.mipmapped) {
+            this.gl.generateMipmap(this.gl.TEXTURE_2D);
+        }
+        this.gl.clear(this.gl.COLOR_BUFFER_BIT | this.gl.DEPTH_BUFFER_BIT);
     }
     unbind() {
         this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
-    } 
+    }
 }
 class PostProcess {
     constructor(gl, program) {
@@ -1793,6 +2107,327 @@ class PostProcess {
         gl.drawArrays(gl.TRIANGLES, 0, 3);
     }
 }
+class PassQuad {
+    //Fullscreen triangle pass
+    constructor(gl) {
+        this.gl = gl;
+        this.vao = gl.createVertexArray();
+        gl.bindVertexArray(this.vao);
+        const quad = new Float32Array([-1, -1, 3, -1, -1, 3]);
+        const buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+        gl.bindVertexArray(null);
+    }
+    run(program, target, width, height, setUniforms = null) {
+        const gl = this.gl;
+        if (target) {
+            target.bind();
+        } else {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        }
+        gl.viewport(0, 0, width, height);
+        program.use();
+        if (setUniforms) setUniforms();
+        gl.bindVertexArray(this.vao);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+}
+class FluidSim {
+    /*
+    Grid-based eularian.
+    texture channels: xy = velocity, z = pressure, w = mass (solid or not)
+    */
+    constructor(glContext, level, options = {}) {
+        this.gl = glContext.gl;
+        this.level = level;
+
+        this.width = level.width * 2;
+        this.height = level.height * 2;
+
+        this.dt = options.dt ?? 1.0;//time step
+        this.dx = options.dx ?? 1.0;// grid cell size
+        this.iterations = options.iterations ?? 3; // pressure iterations
+
+        this.passes = {
+            advection: glContext.createProgram({
+                vertex: fluidVertexShader,
+                fragment: fluidAdvectionShader,
+            }),
+            pressure: glContext.createProgram({
+                vertex: fluidVertexShader,
+                fragment: fluidPressureShader,
+            }),
+            gradient: glContext.createProgram({
+                vertex: fluidVertexShader,
+                fragment: fluidGradientShader,
+            }),
+            mask: glContext.createProgram({
+                vertex: fluidVertexShader,
+                fragment: fluidMaskShader,
+            }),
+        };
+
+        this.quad = new PassQuad(this.gl);
+
+        const fmt = { format: this.gl.RGBA16F };
+        this.ping = glContext.createRenderTarget(fmt, {
+            width: this.width,
+            height: this.height,
+        });
+        this.pong = glContext.createRenderTarget(fmt, {
+            width: this.width,
+            height: this.height,
+        });
+
+        //the mask informs the shader what is solid, must be made from level tiles cause render alpha wouldn't make sense
+        this.mask = new Uint8Array(this.width * this.height);
+        this.buildMask();
+
+        //Upload mask to a texture
+        //takes texture 7. 0 and 1 are exclusively for assets.
+        this.maskTexture = this.gl.createTexture();
+        this.gl.activeTexture(this.gl.TEXTURE7);
+        this.gl.bindTexture(this.gl.TEXTURE_2D, this.maskTexture);
+        //R8 rows packing
+        this.gl.pixelStorei(this.gl.UNPACK_ALIGNMENT, 1);
+        this.gl.texImage2D(
+            this.gl.TEXTURE_2D, 0, this.gl.R8,
+            this.width, this.height, 0,
+            this.gl.RED, this.gl.UNSIGNED_BYTE, this.mask
+        );
+        this.gl.pixelStorei(this.gl.UNPACK_ALIGNMENT, 4);
+        this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MIN_FILTER, this.gl.NEAREST);
+        this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MAG_FILTER, this.gl.NEAREST);
+        this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_S, this.gl.CLAMP_TO_EDGE);
+        this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_T, this.gl.CLAMP_TO_EDGE);
+
+        //Both targets get the mask texture
+        const gl = this.gl;
+        gl.disable(gl.BLEND);
+        gl.disable(gl.DEPTH_TEST);
+        for (const rt of [this.ping, this.pong]) {
+            this.quad.run(this.passes.mask, rt, this.width, this.height, () => {
+                this.gl.uniform1i(this.passes.mask.uniform("iChannel0"), 8);
+                this.gl.uniform2fv(this.passes.mask.uniform("simSize"), [this.width, this.height]);
+                this.gl.activeTexture(this.gl.TEXTURE8);
+                this.gl.bindTexture(this.gl.TEXTURE_2D, this.maskTexture);
+            });
+        }
+        gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        //leave the place undisturbed
+        gl.activeTexture(gl.TEXTURE0);
+    }
+
+    buildMask() {
+        const s = this.level.ground;
+        //Matches point/rectCollision exactly
+        const cell = Level.tileSize * 0.5;
+        for (let y = 0; y < this.height; y++) {
+            for (let x = 0; x < this.width; x++) {
+                const row = s.data.length - y - 1;
+                const col = x - s.x;
+                let solid = true;
+                if (row >= 0 && row < s.data.length && col >= 0 && col < s.data[0].length) {
+                    const tile = s.data[row][col];
+                    solid = !!(this.level.colliders[tile] ?? null);
+                }
+                // w < 0 marks as solid
+                this.mask[y * this.width + x] = solid ? 255 : 0;
+            }
+        }
+    }
+
+    step(wind = null, stir = null) {
+        const gl = this.gl;
+        const { width, height } = this;
+        const simSize = [width, height];
+
+        //sim passes write raw float state, no alpha blending.
+        gl.disable(gl.BLEND);
+        gl.disable(gl.DEPTH_TEST);
+
+        //Do advection
+        this.quad.run(this.passes.advection, this.pong, width, height, () => {
+            gl.uniform1i(this.passes.advection.uniform("iChannel0"), 8);
+            gl.activeTexture(gl.TEXTURE8);
+            gl.bindTexture(gl.TEXTURE_2D, this.ping.texture);
+            gl.uniform1f(this.passes.advection.uniform("dt"), this.dt);
+            gl.uniform1f(this.passes.advection.uniform("dx"), this.dx);
+            gl.uniform2fv(this.passes.advection.uniform("simSize"), simSize);
+            gl.uniform4fv(this.passes.advection.uniform("wind"), wind ?? windUniformData);
+            gl.uniform4fv(this.passes.advection.uniform("stir"), stir ?? [0, 0, 0, 0]);
+        });
+        [this.ping, this.pong] = [this.pong, this.ping];
+
+        //Do the prescribed number of jacobis.
+        for (let i = 0; i < this.iterations; i++) {
+            this.quad.run(this.passes.pressure, this.pong, width, height, () => {
+                gl.uniform1i(this.passes.pressure.uniform("iChannel0"), 8);
+                gl.activeTexture(gl.TEXTURE8);
+                gl.bindTexture(gl.TEXTURE_2D, this.ping.texture);
+                gl.uniform1f(this.passes.pressure.uniform("dx"), this.dx);
+                gl.uniform2fv(this.passes.pressure.uniform("simSize"), simSize);
+            });
+            [this.ping, this.pong] = [this.pong, this.ping];
+        }
+
+        //Pressure solve
+        this.quad.run(this.passes.gradient, this.pong, width, height, () => {
+            gl.uniform1i(this.passes.gradient.uniform("iChannel0"), 8);
+            gl.activeTexture(gl.TEXTURE8);
+            gl.bindTexture(gl.TEXTURE_2D, this.ping.texture);
+            gl.uniform1f(this.passes.gradient.uniform("dx"), this.dx);
+            gl.uniform2fv(this.passes.gradient.uniform("simSize"), simSize);
+        });
+        [this.ping, this.pong] = [this.pong, this.ping];
+
+        //leave undisturbed!
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.enable(gl.DEPTH_TEST);
+        gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+        gl.bindVertexArray(null);
+        gl.activeTexture(gl.TEXTURE0);
+    }
+
+    //The wind can be sampled, prefer not to though.
+    sample(x, y) {
+        const gl = this.gl;
+        const tx = Math.min(this.width - 1, Math.max(0, Math.floor(x / (Level.tileSize * 0.5))));
+        const ty = Math.min(this.height - 1, Math.max(0, Math.floor(y / (Level.tileSize * 0.5))));
+        const buf = new Float32Array(4);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.ping.framebuffer);
+        gl.readPixels(tx, ty, 1, 1, gl.RGBA, gl.FLOAT, buf);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        return { x: buf[0], y: buf[1] };
+    }
+}
+
+class WindParticles {
+    constructor(glContext, options = {}) {
+        this.gl = glContext.gl;
+        this.count = options.count ?? 3000;
+
+        const gl = this.gl;
+        const seed = new Float32Array(this.count * 4);
+        for (let i = 0; i < this.count; i++) {
+            // x = -1 forces the respawn scatter
+            seed[i * 4 + 0] = -1 - i;
+            seed[i * 4 + 1] = i;
+            seed[i * 4 + 2] = 0;
+            seed[i * 4 + 3] = 0;
+        }
+
+        this.buffers = [gl.createBuffer(), gl.createBuffer()];
+        for (const b of this.buffers) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, b);
+            gl.bufferData(gl.ARRAY_BUFFER, seed, gl.DYNAMIC_COPY);
+        }
+        //unbind because it doesn't play nice with TF
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+        this.updateVaos = [gl.createVertexArray(), gl.createVertexArray()];
+        this.drawVaos = [gl.createVertexArray(), gl.createVertexArray()];
+        for (let i = 0; i < 2; i++) {
+            gl.bindVertexArray(this.updateVaos[i]);
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers[i]);
+            gl.enableVertexAttribArray(0);
+            gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 16, 0);
+
+            gl.bindVertexArray(this.drawVaos[i]);
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers[i]);
+            gl.enableVertexAttribArray(0);
+            gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 16, 0);
+            gl.bindVertexArray(null);
+        }
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+        this.cur = 0; //buffer index
+        this.spawnCenter = [0, 0];
+        this.spawnRadius = [320, 180]; // default: roughly one screen around camera
+
+        // --- update the TF
+        const vs = this.compile(gl.VERTEX_SHADER, windParticleVertex);
+        const fs = this.compile(gl.FRAGMENT_SHADER, windParticleFragment);
+        this.updateProgram = gl.createProgram();
+        gl.attachShader(this.updateProgram, vs);
+        gl.attachShader(this.updateProgram, fs);
+        gl.transformFeedbackVaryings(this.updateProgram, ["outData"], gl.INTERLEAVED_ATTRIBS);
+        gl.linkProgram(this.updateProgram);
+        if (!gl.getProgramParameter(this.updateProgram, gl.LINK_STATUS))
+            console.log(gl.getProgramInfoLog(this.updateProgram));
+        this.uFluid = gl.getUniformLocation(this.updateProgram, "iChannel0");
+        this.uSimSize = gl.getUniformLocation(this.updateProgram, "simSize");
+        this.uLevelSize = gl.getUniformLocation(this.updateProgram, "levelSize");
+        this.uDt = gl.getUniformLocation(this.updateProgram, "dt");
+        this.uSpawnCenter = gl.getUniformLocation(this.updateProgram, "spawnCenter");
+        this.uSpawnRadius = gl.getUniformLocation(this.updateProgram, "spawnRadius");
+
+        this.transformFeedback = [gl.createTransformFeedback(), gl.createTransformFeedback()];
+    }
+
+    compile(type, source) {
+        const gl = this.gl;
+        const shader = gl.createShader(type);
+        gl.shaderSource(shader, source);
+        gl.compileShader(shader);
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS))
+            console.log(gl.getShaderInfoLog(shader));
+        return shader;
+    }
+
+    step(fluidSim, dt) {
+        const gl = this.gl;
+        const src = this.cur;
+        const dst = 1 - this.cur;
+
+        gl.useProgram(this.updateProgram);
+
+        gl.bindVertexArray(this.updateVaos[src]);
+        //webgl is annoying
+        gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, this.transformFeedback[dst]);
+        gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, this.buffers[dst]);
+
+        gl.activeTexture(gl.TEXTURE8);
+        gl.bindTexture(gl.TEXTURE_2D, fluidSim.ping.texture);
+        gl.uniform1i(this.uFluid, 8);
+        gl.uniform2f(this.uSimSize, fluidSim.width, fluidSim.height);
+        gl.uniform2f(this.uLevelSize,
+            fluidSim.level.width * Level.tileSize,
+            fluidSim.level.height * Level.tileSize);
+        gl.uniform1f(this.uDt, dt);
+        gl.uniform2fv(this.uSpawnCenter, this.spawnCenter);
+        gl.uniform2fv(this.uSpawnRadius, this.spawnRadius);
+
+        gl.enable(gl.RASTERIZER_DISCARD);
+        gl.beginTransformFeedback(gl.POINTS);
+        gl.drawArrays(gl.POINTS, 0, this.count);
+        gl.endTransformFeedback();
+        gl.disable(gl.RASTERIZER_DISCARD);
+
+        gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null);
+        gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+        gl.bindVertexArray(null);
+        gl.activeTexture(gl.TEXTURE0);
+
+        this.cur = dst;
+    }
+
+    draw() {
+        const gl = this.gl;
+        gl.bindVertexArray(this.drawVaos[this.cur]);
+        gl.drawArrays(gl.POINTS, 0, this.count);
+        gl.bindVertexArray(null);
+    }
+}
+
 class GLParticles {
     constructor(gl, maxGLParticles = 100000) {
         this.gl = gl;
@@ -1991,7 +2626,7 @@ const PhysUtils = {
 
         const al = Math.hypot(ax, ay);
         const bl = Math.hypot(bx, by);
-  
+
         if (al == 0 || bl == 0) {
             return {
                 x: p.x,
@@ -2226,7 +2861,7 @@ class Entity {
         this.uvs = [];
 
         this.health;
-        
+
     }
     solveAxis(dx, dy, level) {
         const tile = Level.tileSize * 0.5;
@@ -2318,7 +2953,7 @@ class Entity {
                 this.vertices[i * 18 + j * 3] = point.x / 2;
                 this.vertices[i * 18 + j * 3 + 1] = point.y / 2;
                 this.vertices[i * 18 + j * 3 + 2] = this.z + this.uvs[i * 18 + j * 3 + 2] / 2000;
-            } 
+            }
         }
     }
     updateFeet(feet, tolerance) {
@@ -2413,7 +3048,7 @@ class Humanoid extends Entity {
         this.pickInitFunction("leg")(this, 13);
         this.hitbox.hh = this.hitbox.h;
         this.tic = 0;
-        
+
     }
     displayHitbox() {
         let hb = this.hitbox;
@@ -2435,13 +3070,13 @@ class Humanoid extends Entity {
         }
         this.hitbox.xv *= this.hitbox.onGround ? 0.92 : 0.98;
         this.hitbox.yv *= 0.99;
-        this.hitbox.xv+=this.tilt*0.02;
+        this.hitbox.xv+=this.tilt*0.014;
         this.nodes[0].x = this.hitbox.cx * 2;
         this.nodes[0].y = (this.hitbox.y + this.hitbox.hh * 0.5) * 2 - 2;
         this.nodes[1].x = this.hitbox.cx * 2 + this.tilt+this.hitbox.xv;
         this.nodes[1].y = (this.hitbox.y + this.hitbox.hh * 0.5) * 2 + 10;
 
-         
+
     }
     static updateFunctions = {
         normalMovement: {
@@ -2457,15 +3092,15 @@ class Humanoid extends Entity {
                     x: 0,
                     y: -Math.sign(thi.facing)
                 });
-                
+
                 if(ind==6){
                     PhysUtils.springPhys(
                     curNode,
                     thi.hitbox.cx*2+(thi.hand.x*50+5),
                     thi.hitbox.cy*2+(thi.hand.y*75-9),
-                    0.1, 
+                    0.1,
                     0.82,
-                );  
+                );
                 }else{
                     PhysUtils.springPhys(
                         curNode,
@@ -2528,22 +3163,25 @@ class Humanoid extends Entity {
     }
     updateNodes() {
         //PhysUtils.springPhys(body, tx, ty, strength, damping)
-
-        const aim = input.rs.x;
+ const aim = input.rs.x;
         const move = this.hitbox.xv;
-/*
-        if (Math.abs(aim) > 0.25) {
+
+        const aimDeadzone = 6.0;
+        const moveDeadzone = 1.1;
+
+        const aimActive = Math.abs(aim) > aimDeadzone;
+        const moveActive = Math.abs(move) > moveDeadzone;
+
+        if (aimActive) {
             this.targetFacing = Math.sign(aim);
+        } else if (moveActive) {
+            this.targetFacing = Math.sign(move);
         }
-            */
-        if (Math.abs(move) > 1.1) {
-        //    this.targetFacing = Math.sign(move);
-        }
-        if (Math.abs(aim) > 0.8) {
-      //      this.targetFacing = Math.sign(aim);
-            this.facing += (this.targetFacing - this.facing) * 0.08;
-        } 
-        this.facing += (this.targetFacing - this.facing) * 0.03;
+
+        // turn speed
+        const turnSpeed = aimActive ? 0.16 : 0.06;
+
+        this.facing += (this.targetFacing - this.facing) * turnSpeed;
         this.facing = Math.max(-1, Math.min(1, this.facing));
 
 
@@ -2783,8 +3421,8 @@ class ArachnidBoss extends Entity {
         this.hitbox.ht = 64 - Math.abs(this.hitbox.xv) * 2 + Math.min(this.hitbox.yv, 0) * 4;
         this.hitbox.hh -= (this.hitbox.hh - this.hitbox.ht) / 8.0;
         this.hitbox.hh = Math.max(this.hitbox.hh, 58);
-    
-        this.orientLimbs(); 
+
+        this.orientLimbs();
 
         //███████████ Change
         for (var i = 0; i < 8; i++) {
@@ -2803,7 +3441,7 @@ class ArachnidBoss extends Entity {
 
     }
 }
-class EntityHandler { 
+class EntityHandler {
     constructor(maxSize = 15300) {
         this.entities = [];
         this.vertexBuffer = new Float32Array(maxSize);
@@ -2849,7 +3487,7 @@ class EntityHandler {
 
         mesh.setAttribute("uv", this.uvBuffer.subarray(0, u));
     }
-} 
+}
 const EntityUV = {
     ArachnidBoss: [{ x: 0, y: 0, z: -0.5 }, { x: 136, y: 0, z: 0 }, { x: 121, y: 0, z: 0 }, { x: 136, y: 0, z: 0 }, { x: 121, y: 0, z: 0 }, { x: 136, y: 0, z: 0 }, { x: 121, y: 0, z: 0 }, { x: 136, y: 0, z: 0 }, { x: 121, y: 0, z: 0 }, { x: 136, y: 0, z: -1 }, { x: 121, y: 0, z: -1 }, { x: 136, y: 0, z: -1 }, { x: 121, y: 0, z: -1 }, { x: 136, y: 0, z: -1 }, { x: 121, y: 0, z: -1 }, { x: 136, y: 0, z: -1 }, { x: 121, y: 0, z: -1 }, ],
     Humanoid: [{ x: 0, y: 0, z: 0 }, { x: 53, y: 0, z: -1 }, { x: 84, y: 0, z: 1 }, { x: 52, y: 34, z: -0.5 }, { x: 83, y: 34, z: 0.95 }, { x: 48, y: 66, z: 0.1 }, { x: 78, y: 66, z: 0.2 }, { x: 48, y: 103, z: 0.8 }, { x: 78, y: 103, z: 0.9 }, ]
@@ -3063,7 +3701,7 @@ class PlayerAttack {
     constructor(player) {
         this.player = player;
 
-       
+
 
         this.inputs = [];
 
@@ -3080,17 +3718,17 @@ class PlayerAttack {
         this.defenceMult = 1;
     }
 
-  
+
 
     addInput(direction) {
 
         this.inputs.push(direction);
 
-  
+
         if (this.direction === null) {
             this.direction = direction;
         }
-        
+
     const bigrams = [];
 
     for (let i = 0; i < this.inputs.length - 1; i++) {
@@ -3122,12 +3760,12 @@ class PlayerAttack {
             }
 
             if (matches) {
-               
+
                 this.damageMult *= pattern.damageMult ?? 1;
                 this.defenceMult *= pattern.defenceMult ?? 1;
-                
+
                 this.damageMult=Math.max(this.damageMult,10);
-                
+
                 return name;
             }
         }
@@ -3137,11 +3775,11 @@ class PlayerAttack {
     }
 
     update() {
-        
+
 
         const pose = this.getPose(this.phase);
 
-        
+
         if (pose) {
             this.phase += this.speed*(pose.mult*0.5+0.5);
             this.hand.xv += (pose.x/100-this.player.hand.x)*0.1;
@@ -3157,7 +3795,7 @@ class PlayerAttack {
             this.hand.xv*=0.7;
             this.hand.yv*=0.7;
           this.player.tilt *= 0.9;
-        } 
+        }
         this.player.hand.x+=this.hand.xv;
             this.player.hand.y+=this.hand.yv;
         if ((this.phase >= this.inputs.length&&this.inputs.length!=0)||this.inputs.length>10) {
@@ -3174,7 +3812,7 @@ class PlayerAttack {
             if(this.inputs.length<=10){
                 this.wait=0;
             }
-        } 
+        }
         }
     }
 
@@ -3204,7 +3842,7 @@ class PlayerAttack {
                 poses.push(pose);
         }
 
-       
+
 
         const index = Math.floor(this.phase);
         if(index>=poses.length){
@@ -3281,7 +3919,7 @@ class Item {
             inv.items[chk]=this;
             this.inInventory=true;
         }
-    } 
+    }
 }
 
 
@@ -3299,15 +3937,15 @@ class TileSet {
     addHitEvent(char, func){
     this.tiles[char].onHit=func;
     }
-} 
+}
 class Level {
-    static tileSize = 64; 
+    static tileSize = 64;
     static changeRoom(ind){
     const via=world.level.zones.vias[ind];
- 
+
     const ta = via.destination;
     const s= world.levels[ta].ground;
-   
+
     let found=false;
     for (let row = 0; row < s.data.length; row++) {
         for (let col = 0; col < s.data[row].length; col++) {
@@ -3319,8 +3957,8 @@ class Level {
                 found=point;
             }
         }
-    } 
- 
+    }
+
     if(!Player.pinRoomTransition){
          world.levelInd=ta;
     world.updateMesh();
@@ -3329,7 +3967,7 @@ class Level {
     Player.entity.hitbox.x=found.x/2-Player.entity.hitbox.w*0.5+via.off.x/2;
     Player.entity.hitbox.xv=0;
     }
-    
+
     Player.inRoomTransition=true;
     }
     constructor(name, slices,tileset,zones={}) {
@@ -3360,13 +3998,13 @@ class Level {
         const tile = s.data[s.data.length - ty - 1][tx];
         return this.colliders[tile] ?? null;
     }
-    rectCollision(box) { 
+    rectCollision(box) {
         const s = this.ground;
         const tile = Level.tileSize * 0.5;
- 
+
         const tx0 = Math.floor(box.x / tile - s.x);
         const ty0 = Math.floor(box.y / tile - s.y);
- 
+
         const tx1 = Math.floor((box.x + box.w - 0.001) / tile - s.x);
         const ty1 = Math.floor((box.y + box.h - 0.001) / tile - s.y);
 
@@ -3378,7 +4016,7 @@ class Level {
 
                 const tileId = s.data[s.data.length - ty - 1][tx];
                 const collider = this.colliders[tileId];
-               
+
                 this.tileset.get(tileId)?.onHit?.(tileId);
                 if (collider) {
                     return collider;
@@ -3498,9 +4136,13 @@ const meshData = lev.buildMesh();
 
 worldMesh.setAttribute("coordinates", meshData.coordinates);
 worldMesh.setAttribute("uv", meshData.uv);
-let pair=this.roomAssets[lev.name] ?? [null,null];
-this.currentTilemap=pair[0];
-this.currentTilemapNormal=pair[1];
+    let pair=this.roomAssets[lev.name] ?? [null,null];
+    this.currentTilemap=pair[0];
+    this.currentTilemapNormal=pair[1];
+    // rebuild the air-current sim for the new level size
+    if (this.fluidSim) {
+        this.fluidSim = new FluidSim(gfx, lev);
+    }
 }
 }
 
@@ -3545,18 +4187,18 @@ class Camera {
         this.shx/=1.1;
         this.shy/=1.1;
         this.shstr/=1.1;
-    
+
         this.x = Math.smoothMax(Math.smoothMin(this.x, world.level.width * 32 - 160, 32), 160, 32)+this.shx;
         this.y = Math.smoothMax(Math.smoothMin(this.y, world.level.height * 32 - 90, 32), 90, 32)+this.shy;
     }
     snap() {
-        if (!this.target) return; 
+        if (!this.target) return;
         this.x = this.target.cx;
         this.y = this.target.cy;
         this.xv = 0;
         this.yv = 0;
     }
-} 
+}
 
 
 await loadScripts();
@@ -3597,9 +4239,10 @@ const triOrder = [0, 1, 2, 0, 2, 3];
 const defaultUITheme = {
     colors: {
         background: "rgb(0,0,0)",
-        panel: "rgb(30,40,50,0.1)",
+        panel: "rgb(30,40,50,0.6)",
         border: "#606579",
-        text: "#334422",
+        text: "#FFEEBB",
+        strokeStyle:"rgb(0,0,0)",
         muted: "#aaaab7",
         button: "#343747",
         focus: "#b8a0ff",
@@ -3610,7 +4253,8 @@ const defaultUITheme = {
     fonts: {
         title: '36px "Gravitas One"',
         body: '26px "IM Fell DW Pica"',
-        small: '12px "IM Fell DW Pica"'
+        small: '12px "IM Fell DW Pica"',
+        strokeWidth:5,
     },
 
     borders: {
@@ -3805,7 +4449,7 @@ const levelData = [{
             f: true,
             g: true,
             h: true,
-            i: true, 
+            i: true,
         },
     },
 
@@ -3883,7 +4527,7 @@ const levelData2 = [
             "     n                      c",
             "     ne                     c",
             "aaaaaaaaaaaaaaaaaaaaaaaaaa0aa",
-        ], 
+        ],
         colliders: {
             a: true,
             b: true,
@@ -3893,7 +4537,7 @@ const levelData2 = [
             n: true,
         },
     },
- 
+
     {
         x: -2,
         y: -1,
@@ -3913,7 +4557,7 @@ const levelData2 = [
     {
         x: -1,
         y: -1,
-        z: 1.25, 
+        z: 1.25,
         data: [
             "                                    ",
             "ddddddddddddddddddddddddddddddd",
@@ -3928,7 +4572,7 @@ const levelData2 = [
      {
         x: 0,
         y: -1,
-        z: 0.75, 
+        z: 0.75,
         data: [
             "                                    ",
             "ddddddddddddddddddddddddddddddd",
@@ -3940,7 +4584,7 @@ const levelData2 = [
             "                       c            ",
         ],
     },
-]; 
+];
 let level = new Level("room_1", levelData,tiles1, {
     lights: new Float32Array([527, 147, 1.25, 526 + 256, 147, 0.75, 526 + 512, 147, 1.25]),
     vias:{"0":{destination:"bank",off:{x:-64,y:65}}}
@@ -3950,7 +4594,7 @@ const level2 = new Level("bank", levelData2,tiles2, {
     vias:{"0":{destination:"room_1",off:{x:64,y:0}}}
 });
 
- 
+
 
 let entityHandler = new EntityHandler();
 entityHandler.add(new Humanoid(256, 32, 1.001, "player"));
@@ -3965,11 +4609,11 @@ Player.update=function(){
   if (input.up() && Player.entity.hitbox.onGround) {
             Player.entity.hitbox.yv = 4.2;
         }
-        
+
             Player.entity.hitbox.xv += (Player.entity.hitbox.onGround ? 0.19 : 0.07)*input.ls.x;
-            
+
         Player.attack.update();
-   
+
 }
 Player.inRoomTransition=false;
 Player.pinRoomTransition=false;
@@ -3989,9 +4633,39 @@ world.levelInd="bank";
 world.updateMesh();
 let particles = [];
 
+//init fluid sim
+const windUniformData = new Float32Array(8 * 4);
+const fluidSim = new FluidSim(gfx, world.level);
+world.fluidSim = fluidSim;
+
+// Draw pass for the dust
+const windDrawProgram = gfx.createProgram({
+    vertex: `#version 300 es
+precision highp float;
+layout(location=0) in vec4 inData;
+uniform vec3 camera;
+uniform float size;
+out float vLife;
+void main() {
+    vec3 pos = vec3(inData.x, inData.y, 1.0) / vec3(160.0, 90.0, 1.0);
+    pos.z -= 1.0;
+    pos.z /= 1.5;
+    pos.z += 1.0;
+    pos -= camera.xyz / vec3(160.0, 90.0, 1.0);
+    gl_Position = vec4(pos.x / pos.z, pos.y / pos.z, pos.z / 10.0 - 1.0, 1.0);
+    gl_PointSize = size;
+    vLife = inData.w;
+}
+`,
+    fragment: windParticleFragment,
+});
+const windDrawCamMat = windDrawProgram.uniform("camera");
+const windDrawSizeLoc = windDrawProgram.uniform("size");
+const windParticles = new WindParticles(gfx, { count: 3000 });
+
 const maxLights = 8;
 const lightUniformData = new Float32Array(maxLights * 3);
- 
+
 const camera = new Camera(Player.entity.hitbox);
 
 var player = {
@@ -4002,10 +4676,57 @@ var player = {
     py: 1,
     pz: 0
 };
+const uiShortcuts = {
+    bindGameScreen() {
+        ui.unbindAllShortcuts();
 
+        ui.bindShortcut("m", () => {
+            ui.pushScreen(settingsScreen);
+            this.bindSettingsScreen();
+        });
+
+        ui.bindShortcut("i", () => {
+            ui.pushScreen(inventoryScreen);
+            this.bindInventoryScreen();
+        });
+    },
+
+    bindSettingsScreen() {
+        ui.unbindAllShortcuts();
+
+        ui.bindShortcut("m", () => {
+            ui.popScreen();
+            if(ui.screenStack[ui.screenStack.length-1]==gameScreen){
+            uiShortcuts.bindGameScreen();
+        }else if(ui.screenStack[ui.screenStack.length-1]==root){
+            ui.unbindAllShortcuts();
+        }
+        });
+
+        ui.bindShortcut("i", () => {
+            ui.pushScreen(inventoryScreen);
+            this.bindInventoryScreen();
+        });
+    },
+
+    bindInventoryScreen() {
+        ui.unbindAllShortcuts();
+
+        ui.bindShortcut("m", () => {
+            ui.popScreen();
+            this.bindGameScreen();
+        });
+
+        ui.bindShortcut("i", () => {
+            ui.popScreen();
+            this.bindSettingsScreen();
+        });
+    }
+};
 const ui = new UIManager(c);
+
 const mainMenu = new UIStack({
-    width: UISize.percent(1),
+    width: UISize.percent(0.37),
     height: UISize.fill(),
     direction: "column",
     gap: 10,
@@ -4014,8 +4735,7 @@ const mainMenu = new UIStack({
     style: {
         background: "panel"
     }
-}); 
- 
+});
 mainMenu.add(
     new UILabel({
         text: "Honest",
@@ -4036,8 +4756,9 @@ mainMenu.add(
         text: "[Play]",
         textAlign: "left",
         font: "body",
+        style:{radius:8},
         onActivate: () => {
- 
+        uiShortcuts.bindGameScreen();
         ui.setScreen(gameScreen);
     }
     }),
@@ -4046,7 +4767,8 @@ mainMenu.add(
         text: "[Settings]",
         textAlign: "left",
         font: "small",
-        onActivate: () => ui.pushScreen(settingsScreen)
+        style:{radius:8},
+        onActivate: () => {ui.pushScreen(settingsScreen);uiShortcuts.bindSettingsScreen();}
     })
 );
 let backArtImage=await atlas.setImage(backArtSRC)
@@ -4058,7 +4780,7 @@ const backArt = new UIImage({
 const root = new UIOverlay({
     width: UISize.fill(),
     height: UISize.fill()
-}); 
+});
 root.add(backArt)
 root.add(mainMenu);
 const gameScreen = new UIGameScreen({
@@ -4066,15 +4788,16 @@ const gameScreen = new UIGameScreen({
     width: UISize.fill(),
     height: UISize.fill()
 });
-
+/*
 gameScreen.add(
     new UIButton({
         text: "[Pause]",
         font: "body",
+        style:{radius:8},
         onActivate: () => ui.pushScreen(pauseScreen)
     })
 );
-
+*/
 gameScreen.addUpdater((input, ui, screen) => {
     Player.pinRoomTransition=Player.inRoomTransition;
     Player.inRoomTransition=false;
@@ -4088,16 +4811,54 @@ gameScreen.addUpdater((input, ui, screen) => {
         gl.uniform3fv(camMat, [camera.x, camera.y, camera.z]);
         lightUniformData.fill(0);
         lightUniformData.set(world.level.zones.lights.subarray(0, lightUniformData.length));
- 
+
         gl.uniform3fv(glLights, lightUniformData);
         gl.uniform1f(iTime, performance.now());
+
+        //fluid stuff
+        {
+            windUniformData.fill(0);
+            // WIND EMITTERS DISABLED FOR TUNING
+            // zones.wind entries: [x, y, vx, vy] in level pixels (y up).
+            // const winds = world.level.zones.wind;
+            // if (winds) {
+            //     for (let i = 0; i < Math.min(8, winds.length / 4); i++) {
+            //         windUniformData.set([
+            //             winds[i * 4] / TEXEL,
+            //             winds[i * 4 + 1] / TEXEL,
+            //             winds[i * 4 + 2] / TEXEL,
+            //             winds[i * 4 + 3] / TEXEL,
+            //         ], i * 4);
+            //     }
+            // }
+            const plr = Player.entity.hitbox;
+            // 1 sim texel = half a tile = 32 px (2 texels per 64px tile).
+            // Fluid velocities are in texels/step: convert from px/frame.
+            const TEXEL = Level.tileSize * 0.5; // 32 px per texel
+            const stirX = (plr.x + plr.w * 0.5) / TEXEL;
+            const stirY = (plr.y + plr.h * 0.5) / TEXEL;
+            const sim = world.fluidSim;
+            sim.step(windUniformData, [stirX, stirY, plr.xv / TEXEL*100, plr.yv / TEXEL]);
+
+            // push the player with the local air velocity (texels -> px)
+            const wind = sim.sample(stirX, stirY);
+            if (wind && (Math.abs(wind.x) > 0.01 || Math.abs(wind.y) > 0.01)) {
+                plr.xv += wind.x * TEXEL * 0.002;
+                plr.yv += wind.y * TEXEL * 0.002;
+            }
+
+            //gpu advect
+            windParticles.spawnCenter = [camera.x, camera.y];
+            windParticles.spawnRadius = [360, 220];
+            windParticles.step(sim, 1.0);
+        }
 
         for (var i = 0; i < 1; i++) {
             entityHandler.entities[i + 1].hitbox.xv = Math.sin(i + frameCount * 0.02)
         }
         Player.update();
         //console.log(input.ls)
-        glparticles.clear(); 
+        glparticles.clear();
     if(world.levelInd!="bank"){
         for (var i = 0; i < 3; i++) {
             let x = world.level.zones.lights[i * 3]
@@ -4123,7 +4884,10 @@ gameScreen.addUpdater((input, ui, screen) => {
         sceneTarget.bind();
 
         mainProgram.use();
+
+        gl.activeTexture(gl.TEXTURE0);
         atlas.setImage(world.currentTilemap);
+        gl.activeTexture(gl.TEXTURE1);
         atlasNormals.setImage(world.currentTilemapNormal);
         worldMesh.draw();
         atlas.setImage(entityAtlas.canvas);
@@ -4136,7 +4900,15 @@ gameScreen.addUpdater((input, ui, screen) => {
         gl.depthMask(true);
         gl.enable(gl.DEPTH_TEST);
         gl.depthFunc(gl.LEQUAL);
-        glparticles.draw(); 
+        glparticles.draw();
+
+        //draw ambient motes
+        if (graphicsSettings.windParticles) {
+            gl.useProgram(windDrawProgram.program);
+            gl.uniform3fv(windDrawCamMat, [camera.x, camera.y, camera.z]);
+            gl.uniform1f(windDrawSizeLoc, 2.0);
+            windParticles.draw();
+        }
         sceneTarget.unbind();
 
         bloomPass.render(sceneTarget, ping);
@@ -4149,12 +4921,12 @@ gameScreen.addUpdater((input, ui, screen) => {
             bloomPass.render(pong, ping);
             bloomPass.render(ping, pong);
             bloomPass.render(pong, ping);
-            bloomPass.render(ping, pong); 
+            bloomPass.render(ping, pong);
             bloomPass.render(pong, ping);
             bloomPass.render(ping, pong);
             bloomPass.render(pong, ping);
         }
-        //bloomPass.render(pong, ping); 
+        //bloomPass.render(pong, ping);
         compPass.render(sceneTarget, null, ping);
         ctx.fillStyle = "rgb(0,0,0)";
         gctx.fillRect(0, 0, 600, 600);
@@ -4162,6 +4934,101 @@ gameScreen.addUpdater((input, ui, screen) => {
         gctx.drawImage(gfx.canvas, 0, 0, 640, 360);
 });
 
+
+function makeMenu(title, ...items) {
+    const menu = new UIStack({
+        width: UISize.fill(),
+        height: UISize.fill(),
+        direction: "column",
+        gap: 12,
+        align: "start",
+        padding: 28,
+        style: { background: "panel" }
+    });
+
+    menu.add(
+        new UILabel({
+            text: title,
+            font: "title",
+            textAlign: "left"
+        }),
+        new UILabel({
+            text: "",
+            font: "body"
+        }),
+        ...items
+    );
+
+    return menu;
+}
+
+function makeButton(text, onActivate, font = "body") {
+    return new UIButton({
+        text,
+        font,
+        textAlign: "left",
+        style:{radius:8},
+        onActivate
+    });
+}
+
+const graphicsMenu = makeMenu(
+    "Graphics",
+    makeButton("Back", () => ui.popScreen()),
+);
+
+function addToggle(menu, label, property) {
+    let button;
+
+    const updateLabel = () => {
+        button.text =
+            `${label}: ${graphicsSettings[property] ? "On" : "Off"}`;
+    };
+
+    button = makeButton("", () => {
+        graphicsSettings[property] = !graphicsSettings[property];
+        updateLabel();
+    });
+
+    updateLabel();
+    menu.add(button);
+}
+  
+const graphicsSettings = {
+    showFPS: true,
+    bloom: true,
+    particles: true,
+    windParticles: true
+};
+addToggle(graphicsMenu, "Show FPS", "showFPS");
+addToggle(graphicsMenu, "Bloom", "bloom");
+addToggle(graphicsMenu, "Particles", "particles");
+
+const audioMenu = makeMenu(
+    "Audio",
+    new UILabel({
+        text: "Audio controls coming soon",
+        font: "body"
+    }),
+    makeButton("Back", () => ui.popScreen())
+);
+const settingsScreen = makeMenu(
+    "Settings",
+    makeButton("Resume", () => {
+        ui.popScreen();
+        if(ui.screenStack[ui.screenStack.length-1]==gameScreen){
+            uiShortcuts.bindGameScreen();
+        }else if(ui.screenStack[ui.screenStack.length-1]==root){
+            ui.unbindAllShortcuts();
+        }
+    }),
+    makeButton("Graphics", () => ui.pushScreen(graphicsMenu)),
+    makeButton("Audio", () => ui.pushScreen(audioMenu)),
+    makeButton("Quit to Main Menu", () => {
+        ui.unbindAllShortcuts();
+        ui.setScreen(root);
+    })
+);
 
 ui.setScreen(root);
 ui.render();
@@ -4184,7 +5051,7 @@ function draw(now) {
         nextFrame += frameTime;
         input.updatePre();
         ui.update(input);
-       
+      
         ui.render();
         ctx.fillStyle = "rgb(200,200,200)";
         ctx.font = "10px Jersey 10";

@@ -378,6 +378,267 @@ void main() {
     fragColor = vertColor;
 }
 </script>
+<script id = 'fluid-shader' type = 'glsl'>#version 300 es
+        
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D iChannel0;
+uniform float iTime;
+uniform vec2 mouse;
+uniform vec2 mouseMove;
+out vec4 fragColor;
+
+//Tonemap from bruOp https://www.shadertoy.com/view/WdjSW3
+float Tonemap_Uchimura(float x, float P, float a, float m, float l, float c, float b) {
+    // Uchimura 2017, "HDR theory and practice"
+    // Math: https://www.desmos.com/calculator/gslcdxvipg
+    // Source: https://www.slideshare.net/nikuque/hdr-theory-and-practicce-jp
+    float l0 = ((P - m) * l) / a;
+    float L0 = m - m / a;
+    float L1 = m + (1.0 - m) / a;
+    float S0 = m + l0;
+    float S1 = m + a * l0;
+    float C2 = (a * P) / (P - S1);
+    float CP = -C2 / P;
+
+    float w0 = 1.0 - smoothstep(0.0, m, x);
+    float w2 = step(m + l0, x);
+    float w1 = 1.0 - w0 - w2;
+
+    float T = m * pow(x / m, c) + b;
+    float S = P - (P - S1) * exp(CP * (x - S0));
+    float L = m + a * (x - m);
+
+    return T * w0 + L * w1 + S * w2;
+}
+
+vec3 Grading(vec3 x) {
+    const float P = 1.0;  // max display brightness
+    const float a = 1.0;  // contrast
+    const float m = 0.22; // linear section start
+    const float l = 0.4;  // linear section length
+    const float c = 1.33; // black
+    const float b = 0.0;  // pedestal
+    return vec3(Tonemap_Uchimura(x.r, P, a, m, l, c, b),Tonemap_Uchimura(x.g, P, a, m, l, c, b),Tonemap_Uchimura(x.b, P, a, m, l, c, b));
+}
+
+mat2 rotate2d(float _angle){
+    return mat2(cos(_angle),-sin(_angle),
+                sin(_angle),cos(_angle));
+}
+vec4 texelFetc(sampler2D iChannel,ivec2 uv,int i){
+	return texelFetch(iChannel,ivec2(mod(vec2(uv),vec2(128.0))),i);
+}
+vec2 get_velocity(vec2 u,vec2 v){
+return texture(iChannel0,u/v).xy;
+}
+float curl(vec2 fc,float dist){
+   
+	  vec4 n = texelFetc(iChannel0, ivec2(fc) + ivec2(0, dist),0);
+    vec4 e = texelFetc(iChannel0, ivec2(fc) + ivec2( dist, 0), 0);
+    vec4 s = texelFetc(iChannel0, ivec2(fc) + ivec2( 0,-dist), 0);
+    vec4 w = texelFetc(iChannel0, ivec2(fc) + ivec2(-dist, 0), 0);
+     float dv_dx = (e.y - w.y) / (2.0 * dist);
+
+    // 3. Compute du/dy (Change in X velocity along Y axis)
+    // Top neighbor X velocity minus Bottom neighbor X velocity
+    float du_dy = (n.x - s.x) / (2.0 * dist);
+
+    // 4. Return Curl = dv/dx - du/dy
+    return dv_dx - du_dy;
+}
+vec4 rel(vec2 fc,float dist){
+	  vec4 n = texelFetc(iChannel0, ivec2(fc) + ivec2(0, dist), 0);
+    vec4 e = texelFetc(iChannel0, ivec2(fc) + ivec2( dist, 0), 0);
+    vec4 s = texelFetc(iChannel0, ivec2(fc) + ivec2( 0,-dist), 0);
+    vec4 w = texelFetc(iChannel0, ivec2(fc) + ivec2(-dist, 0), 0);
+    return (n+e+s+w)/4.0;
+}
+vec2 rotate2D(vec2 v, float angleDegrees) {
+    float angleRad = radians(angleDegrees);
+    float s = sin(angleRad);
+    float c = cos(angleRad);
+    mat2 m = mat2(c, s, -s, c); // Column-major order in GLSL
+    return m * v;
+}
+const float dt=0.015;
+const float dx=1.0;
+const vec2 iResolution=vec2(128.0,128.0); 
+  void main() {
+    vec2 fragCoord= gl_FragCoord.xy;
+   // fragCoord.y=128.0-fragCoord.y;
+   if(iTime==-1.0){
+    vec4 c = texture(iChannel0, fragCoord/iResolution.xy);
+    //fragColor = vec4(abs(c.xy)*4.0f, 0.0, 1.0);
+    //fragColor = vec4(0, 0, c.z * 100.0, 1.0);
+    c.z*=5.0;
+     vec4 n = texelFetc(iChannel0, ivec2(fragCoord) + ivec2( 0, 0), 0);
+    vec4 e = texelFetc(iChannel0, ivec2(fragCoord) + ivec2( 1, 0), 0);
+    vec4 s = texelFetc(iChannel0, ivec2(fragCoord) + ivec2( 1,1), 0);
+    vec4 w = texelFetc(iChannel0, ivec2(fragCoord) + ivec2(0, 1), 0);
+    c.w=length(vec2(n.y-s.y,e.x-w.x))*10.0+c.w*0.5;
+   fragColor.rgb=Grading(mix(vec3(0.3,0.2,0.1),vec3(1.812,0.70,0.50),(1.2*sqrt(n.w)-0.2)))*0.8;
+   fragColor.b+=max(curl(fragCoord,1.0)+curl(fragCoord,2.0)+curl(fragCoord,4.0),0.0)*0.002;
+   fragColor.g-=min(curl(fragCoord,1.0)+curl(fragCoord,2.0)+curl(fragCoord,4.0),0.0)*0.002;
+   //fragColor.rgb=vec3(c.b*0.005+0.5);
+    fragColor.a=0.5;
+   }else{
+   	float ws=mod(iTime,30.0);
+   	if(ws==0.0){
+   	 vec4 o = texelFetc(iChannel0, ivec2(fragCoord), 0);  
+    vec4 n = texelFetc(iChannel0, ivec2(fragCoord) + ivec2( 0, 1), 0);
+    vec4 e = texelFetc(iChannel0, ivec2(fragCoord) + ivec2( 1, 0), 0);
+    vec4 s = texelFetc(iChannel0, ivec2(fragCoord) + ivec2( 0,-1), 0);
+    vec4 w = texelFetc(iChannel0, ivec2(fragCoord) + ivec2(-1, 0), 0);
+    
+    // advection
+    vec2 uv = fragCoord.xy / iResolution.xy;
+
+// Step 1: Midpoint velocity calculation (RK2)
+vec2 v_start = get_velocity(fragCoord.xy, iResolution.xy);
+vec2 pos_mid = fragCoord.xy - 0.5 * v_start * dt;
+vec2 v_mid   = get_velocity(pos_mid, iResolution.xy);
+
+// Step 2: Backward advection target point
+vec2 coord_back = fragCoord.xy - v_mid * dt;
+vec4 phi_back   = texture(iChannel0, coord_back / iResolution.xy);
+
+vec2 v_back        = get_velocity(coord_back, iResolution.xy);
+vec2 coord_forward = coord_back + v_back * dt;
+vec4 phi_forward   = texture(iChannel0, coord_forward / iResolution.xy);
+
+// Step 4: Combine to output error-corrected fluid state
+vec4 original_val = texture(iChannel0, uv);
+vec4 a = phi_back + 0.5 * (original_val - phi_forward);
+
+    
+    
+    
+    if(a.w<0.0){
+    a=vec4(0.0);
+    vec2 vel=abs(o.xy);
+        n.w=n.w<0.0?0.0:vel.y/7.0;
+    e.w=e.w<0.0?0.0:vel.x/7.0;
+    s.w=s.w<0.0?0.0:vel.y/7.0;
+    w.w=w.w<0.0?0.0:vel.x/7.0;
+    a.x+=e.w-w.w;
+    a.y+=n.w-s.w;
+    }
+    
+    fragColor = a;
+vec2 velocity_acceleration = vec2(0.0);
+float confinement_strength = 1.6; // Tune this to control turbulence sharpness
+
+for(float i = 0.0; i < 2.0; i++) {
+    float mult = exp2(i);
+    
+    // 1. Sample absolute vorticities at adjacent grid offsets
+    float omega_L = abs(curl(fragCoord + vec2(-mult, 0.0), mult));
+    float omega_R = abs(curl(fragCoord + vec2( mult, 0.0), mult));
+    float omega_B = abs(curl(fragCoord + vec2(0.0, -mult), mult));
+    float omega_T = abs(curl(fragCoord + vec2(0.0,  mult), mult));
+    
+    // 2. Compute the gradient vector of the vorticity magnitude (N = grad(|omega|)) 
+    // Note: Dividng by (2.0 * mult) normalizes the spatial step size
+    vec2 N = vec2(omega_R - omega_L, omega_T - omega_B) / (2.0 * mult);
+    
+    // 3. Normalize N safely to find the vortex center direction vector
+    float N_len = length(N);
+    vec2 n = N / (N_len + 0.001); // 0.0001 prevents division by zero
+    
+    // 4. Get the local scalar curl at this scale
+    float omega = curl(fragCoord, mult);
+    
+    // 5. Compute 2D cross product: Force is perpendicular to the gradient vector,
+    // scaled by local vorticity, dt, and the loop filter scale factor
+    vec2 force = vec2(n.y, -n.x) * omega * (1.0 / mult);
+    
+    velocity_acceleration += force;
+}
+
+// 6. Apply the accumulated force directly to your velocity field buffer
+// (Do NOT apply this directly to an RGBA color visualization buffer)
+fragColor.xy += velocity_acceleration * confinement_strength * dt;
+
+//fragColor.b*=0.99;
+ 
+  //fragCoord+=fragColor.xy;
+ 
+    // interaction
+ //fragCoord-=fragColor.xy;
+
+
+        float r = uv.x;
+ if(fragCoord.x<16.0&&abs(fragCoord.y-64.0+sin(iTime/200.0)*15.0)<2.0){      
+ fragColor.xy=vec2(190.0,0.0);
+ fragColor.w+=(1.0-fragColor.w)*0.05;
+ 
+ }
+ //fragColor.w+=pow(sin(fragCoord.x/4.0)*sin(fragCoord.y/4.0)*0.5+0.5,256.0)*0.05;
+ 
+    if(fragColor.w<0.5){
+    	fragColor.w-=fragColor.w/3000.0;
+    }else{
+    	fragColor.w+=(1.0-fragColor.w)/3000.0;
+    }
+
+  if(fragCoord.x<2.0||fragCoord.x>128.0-2.0||fragCoord.y<2.0||fragCoord.y>128.0-2.0){
+  	fragColor.w=-10.0;
+  }
+    // boundary condition
+   	}else if(ws==29.0){
+   	vec4 o = texelFetc(iChannel0, ivec2(fragCoord), 0);
+    vec4 n = texelFetc(iChannel0, ivec2(fragCoord) + ivec2( 0, 1), 0);
+    vec4 e = texelFetc(iChannel0, ivec2(fragCoord) + ivec2( 1, 0), 0);
+    vec4 s = texelFetc(iChannel0, ivec2(fragCoord) + ivec2( 0,-1), 0);
+    vec4 w = texelFetc(iChannel0, ivec2(fragCoord) + ivec2(-1, 0), 0);
+        if(o.w>=0.0){
+    // gradient of the pressure
+    n.w=n.w<0.0?0.0:1.0;
+    e.w=e.w<0.0?0.0:1.0;
+    s.w=s.w<0.0?0.0:1.0;
+    w.w=w.w<0.0?0.0:1.0;
+    float per=(0.25*(n.w+e.w+s.w+w.w));
+    vec2 grad = vec2( e.b*e.w/per - w.b*w.w/per,n.b*n.w/per - s.b*s.w/per)*1.0;
+
+    // project
+    
+    fragColor = vec4(o.xy - grad, o.zw);
+    }else{
+    fragColor = vec4(o.xy, o.zw);
+    }
+   	}else{
+   	 vec4 o = texelFetc(iChannel0, ivec2(fragCoord), 0);
+    vec4 n = texelFetc(iChannel0, ivec2(fragCoord) + ivec2( 0, 1), 0);
+    vec4 e = texelFetc(iChannel0, ivec2(fragCoord) + ivec2( 1, 0), 0);
+    vec4 s = texelFetc(iChannel0, ivec2(fragCoord) + ivec2( 0,-1), 0);
+    vec4 w = texelFetc(iChannel0, ivec2(fragCoord) + ivec2(-1, 0), 0);
+    float p=o.b;
+    if(o.w>=0.0){
+    // divergence of the velocity
+    n.w=n.w<0.0?0.0:1.0;
+    e.w=e.w<0.0?0.0:1.0;
+    s.w=s.w<0.0?0.0:1.0;
+    w.w=w.w<0.0?0.0:1.0;
+
+    float div = (e.x - w.x + n.y - s.y) / (1.99*dx);
+    
+    // one jacobi iteration
+    
+    p = 0.25* (n.z + e.z + s.z + w.z-dx*dx*div);
+}
+    fragColor = vec4(o.xy, p, o.w);
+ 
+   	}
+   }
+
+ //fragColor.rgb=sav.ggg;
+		
+	//	fragColor = vec4(final_colour/Z, 1.0);
+	}
+
+  
+  </script>
 <script type="module" src="everything.js">
    
 </script>
