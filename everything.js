@@ -91,7 +91,7 @@ window.addEventListener("mouseup", event => {
             this.pmouseX = this.mouseX;
             this.pmouseY = this.mouseY;
 
-            // browser coordinates to 640x360 canvas coordinates.
+            // browser coordinates to 640x360 canvas coordinates
             this.mouseX =
                 (event.clientX - rect.left) * canvas.width / rect.width;
 
@@ -755,6 +755,224 @@ class UIOverlay extends UIPanel {
     constructor(options = {}) {
         super(options);
         this.layout = new UIOverlayLayout();
+    }
+}
+class GameUI {
+    /*
+    World and screenspace overlays that are pixel based not ratio based
+    as opposed to the other ui classes
+    */
+    constructor(ctx) {
+        this.ctx = ctx;
+        this.bars = new Map(); // entity object {timer, maxHealth}
+        this.barDuration = 2.6; // seconds visible after last damage
+    }
+
+    //updates timers for all entities with shown bars
+    update() {
+        const oneFrame = 1 / 60;
+        for (const [ent, bar] of this.bars) {
+            bar.timer -= oneFrame;
+            if (bar.timer <= 0 || ent.dying || !entityHandler.entities.includes(ent)) {
+                this.bars.delete(ent);
+            }
+        }
+    }
+
+    damage(entity, maxHealth = 100) {
+        if (entity === Player.entity) return; // player has no bar
+        if (!this.bars.has(entity)) {
+            this.bars.set(entity, { timer: this.barDuration, maxHealth });
+        } else {
+            this.bars.get(entity).timer = this.barDuration;
+            this.bars.get(entity).maxHealth = Math.max(maxHealth, this.bars.get(entity).maxHealth);
+        }
+    }
+
+    //flash for the player taking damage
+    playerHit() {
+        this.playerHurtFlash = 0.25; // seconds
+    }
+
+    draw(camera) {
+        const ctx = this.ctx;
+
+        //player bar-static rectangle
+        {
+            const hp = Player.entity?.health ?? 100;
+            const max = Player.entity?.maxHealth ?? 100;
+            const frac = Math.max(0, Math.min(1, hp / max));
+            const w = 120, h = 14;
+            ctx.fillStyle = "rgba(10,10,16,0.85)";
+            ctx.fillRect(14, 14, w + 4, h + 4);
+            ctx.fillStyle = "#4fae59";
+            ctx.fillRect(16, 16, w * frac, h);
+
+            if (this.playerHurtFlash > 0) {
+                this.playerHurtFlash -= 1 / 60;
+                ctx.fillStyle = `rgba(200, 30, 30, ${Math.min(0.4, this.playerHurtFlash * 1.2)})`;
+                ctx.fillRect(0, 0, BASE_W, BASE_H);
+            }
+        }
+
+        for (const [ent, bar] of this.bars) {
+            const hb = ent.hitbox;
+            if (!hb) continue;
+
+            // world to screen, matches the GL projection
+            const sx = (hb.cx - camera.x) * 2 + 320;
+            const sy = 180 - (hb.cy - camera.y) * 2;
+
+            const w = Math.max(40, hb.w);
+            const h = 5;
+            const x = sx - w / 2;
+            const y = sy - hb.h - 12;
+
+            const frac = Math.max(0, Math.min(1, (ent.health ?? bar.maxHealth) / bar.maxHealth));
+            const alpha = Math.min(1, bar.timer / 0.4); // fade at the end
+
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = "#1a1a22";
+            ctx.fillRect(x - 1, y - 1, w + 2, h + 2);
+            ctx.fillStyle = frac > 0.35 ? "#c94f4f" : "#e03131";
+            ctx.fillRect(x, y, w * frac, h);
+            ctx.restore();
+        }
+    }
+}
+
+class AudioTrack {
+    constructor(url) {
+        this.url = url;
+        this.el = new Audio();
+        this.el.loop = true;
+        this.el.preload = "auto";
+        this.el.src = url;
+        this.ready = false;
+        this.el.addEventListener("canplay", () => { this.ready = true; });
+        this.el.addEventListener("error", () => { console.warn("audio missing:", url); });
+    }
+}
+class AudioManager {
+    /*
+    Room and menu music, one track per level name, crossfades between rooms
+    */
+    constructor(tracks, fadeTime = 1.5, gapTime = 0.75) {
+        this.tracks = {};       // name to AudioTrack object
+        this.trackSrcs = tracks;
+        this.current = null; // name
+        this.next = null;  // name of track queued after the fade gap
+        this.fadeTime = fadeTime;
+        this.gapTime = gapTime; // seconds of silence between out/in fades
+        this.gap = 0;   // gap timer
+        this.masterVolume = 0.6;
+    }
+    get(name) {
+        if (!this.tracks[name]) {
+            const src = this.trackSrcs[name];
+            if (!src) return null;
+            this.tracks[name] = new AudioTrack(src);
+        }
+        return this.tracks[name];
+    }
+    play(name) {
+        if (this.current === name && !this.next) return;
+        // old track fades out first
+        if (this.current) {
+            const old = this.get(this.current);
+            if (old) old.fading = -1;
+            this.next = name;
+            this.gap = this.gapTime;
+            return;
+        }
+        this.startTrack(name);
+    }
+    startTrack(name) {
+        const next = this.get(name);
+        this.current = name;
+        this.next = null;
+        if (next && next.ready) {
+            next.el.volume = 0;
+            next.el.play().catch(() => {});
+            next.fading = 1;
+        } else if (next) {
+            //play once it has loaded
+            next.pending = true;
+        }
+    }
+    stop(fadeOut = true) {
+        if (!this.current) return;
+        const old = this.get(this.current);
+        if (old && fadeOut) old.fading = -1;
+        this.current = null;
+        this.next = null;
+    }
+    update(dt = 1 / 60) {
+        const step = dt / this.fadeTime;
+
+        // silence gap
+        if (this.gap > 0) {
+            this.gap -= dt;
+            if (this.gap <= 0 && this.next) {
+                this.startTrack(this.next);
+            }
+        }
+
+        for (const name in this.tracks) {
+            const t = this.tracks[name];
+            if (t.fading === 1) {
+                t.el.volume = Math.min(this.masterVolume, t.el.volume + step * this.masterVolume);
+                if (t.el.volume >= this.masterVolume) t.fading = 0;
+            } else if (t.fading === -1) {
+                t.el.volume = Math.max(0, t.el.volume - step * this.masterVolume);
+                if (t.el.volume <= 0) {
+                    t.el.pause();
+                    t.fading = 0;
+                }
+            } else if (t.pending && t.ready) {
+                t.el.volume = 0;
+                t.el.play().catch(() => {});
+                t.fading = 1;
+                t.pending = false;
+            }
+        }
+    }
+}
+class Fader {
+    constructor() {
+        this.alpha = 0;
+        this.state = "idle"; // idle, out, in
+        this.speed = 3.5;// alpha per second
+        this.callback = null;
+    }
+    get active() { return this.state !== "idle" || this.alpha > 0; }
+    run(callback) {
+        if (this.active) return; // dont stack transitions
+        this.callback = callback;
+        this.state = "out";
+    }
+    update() {
+        const step = this.speed / 60;
+        if (this.state === "out") {
+            this.alpha = Math.min(1, this.alpha + step);
+            if (this.alpha >= 1) {
+                this.callback?.();
+                this.callback = null;
+                this.state = "in";
+            }
+
+        } else if (this.state === "in") {
+            this.alpha = Math.max(0, this.alpha - step);
+            if (this.alpha <= 0) this.state = "idle";
+        }
+    }
+    draw(ctx) {
+        if (this.alpha <= 0) return;
+        ctx.save();
+        ctx.fillStyle = `rgba(0,0,0,${this.alpha})`;
+        ctx.fillRect(0, 0, BASE_W, BASE_H);
+        ctx.restore();
     }
 }
 class UIGameCanvas extends UIElement {
@@ -1562,259 +1780,21 @@ const GFXUtils = {
 }
 let noTexTex = GFXUtils.createMissingTex();
 
-//All fluid sahders, will be moved to index.html but more conveneient here rn
-const fluidVertexShader = `#version 300 es
-precision highp float;
-layout(location=0) in vec2 aPos;
-out vec2 vUv;
-void main(){
-    vUv = aPos * 0.5 + 0.5;
-    gl_Position = vec4(aPos, 0.0, 1.0);
-}
-`;
 
-const fluidAdvectionShader = `#version 300 es
-precision highp float;
-precision highp sampler2D;
-uniform sampler2D iChannel0;
-uniform float dt;
-uniform float dx;
-uniform vec2 simSize;
-uniform vec4 wind[8];   // xy = position, zw = velocity
-uniform vec4 stir;      //Player specific stir.  the player is always there so he is not in wind[]
-in vec2 vUv;
-out vec4 fragColor;
+const fluidVertexShader = document.getElementById("fluidVertexShader").textContent;
 
-vec4 fetch(ivec2 c){
-    return texelFetch(iChannel0, clamp(c, ivec2(0), ivec2(simSize) - 1), 0);
-}
-vec2 velAt(vec2 pos){
-    return fetch(ivec2(floor(pos))).xy;
-}
-float curlAt(vec2 fc, float dist){
-    vec4 n = fetch(ivec2(fc) + ivec2(0, int(dist)));
-    vec4 e = fetch(ivec2(fc) + ivec2(int(dist), 0));
-    vec4 s = fetch(ivec2(fc) - ivec2(0, int(dist)));
-    vec4 w = fetch(ivec2(fc) - ivec2(int(dist), 0));
-    return (e.y - w.y - n.x + s.x) / (2.0 * dist);
-}
-void main(){
-    vec2 fc = vUv * simSize;
-    ivec2 ic = ivec2(fc);
-    vec4 o = fetch(ic);
+const fluidAdvectionShader = document.getElementById("fluidAdvectionShader").textContent;
+ 
+const fluidPressureShader = document.getElementById("fluidPressureShader").textContent;
 
-    //make sure solid cells do not get influenced
-    if (o.w < -1.0) {
-        fragColor = vec4(0.0, 0.0, 0.0, -10.0);
-        return;
-    }
+const fluidGradientShader = document.getElementById("fluidGradientShader").textContent;
 
-    //semi-lagrangian advection
-//faster and not noticably worse than rk4
-    vec2 back = fc - o.xy * dt;
-    vec4 b = fetch(ivec2(back));
-    vec2 nv = b.xy;
-    float nw = b.w;
-    // don't drag solid into air
-    if (nw < -1.0) {
-        nw = o.w;
-        nv = vec2(0.0);
-    }
-
-    //vorticity confinement
-    vec2 force = vec2(0.0);
-    for (int i = 0; i < 2; i++) {
-        float mult = exp2(float(i));
-        float oL = abs(curlAt(fc + vec2(-mult, 0.0), mult));
-        float oR = abs(curlAt(fc + vec2( mult, 0.0), mult));
-        float oB = abs(curlAt(fc + vec2(0.0,-mult), mult));
-        float oT = abs(curlAt(fc + vec2(0.0, mult), mult));
-        vec2 N = vec2(oR - oL, oT - oB) / (2.0 * mult);
-        float nl = length(N);
-        vec2 nDir = N / (nl + 0.001);
-        force += vec2(nDir.y, -nDir.x) * curlAt(fc, mult) / mult;
-    }
-    nv += force * 0.05;
-
-    //wind addition
-    for (int i = 0; i < 8; i++) {
-        if (wind[i].z == 0.0 && wind[i].w == 0.0) continue;
-        vec2 d = fc - wind[i].xy;
-        float infl = exp(-dot(d, d) / 12.0);
-        nv = mix(nv, wind[i].zw, infl * 0.2);
-        nw += (1.0 - nw) * infl * 0.05;
-    }
-
-    //player stir addition
-    {
-        vec2 d = fc - stir.xy;
-        float infl = exp(-dot(d, d) / 8.0);
-        nv = mix(nv, stir.zw, infl * 0.15);
-        nw += (1.0 - nw) * infl * 0.03;
-    }
-
-    //clamp to prevent EXPLODESSSSS
-    nv = clamp(nv, vec2(-4.0), vec2(4.0));
-
-    //Pressure relaxation
-    if (nw < 0.5) nw -= nw / 3000.0;
-    else nw += (1.0 - nw) / 3000.0;
-
-    //Boundary conds
-    if (fc.x < 2.0 || fc.x > simSize.x - 2.0 ||
-        fc.y < 2.0 || fc.y > simSize.y - 2.0) {
-        nw = -10.0;
-    }
-
-    //velocity decay
-    nv *= 0.998;
-
-    fragColor = vec4(nv, o.z, nw);
-}
-`;
-
-const fluidPressureShader = `#version 300 es
-precision highp float;
-precision highp sampler2D;
-uniform sampler2D iChannel0;
-uniform float dx;
-uniform vec2 simSize;
-in vec2 vUv;
-out vec4 fragColor;
-
-vec4 fetch(ivec2 c){
-    return texelFetch(iChannel0, clamp(c, ivec2(0), ivec2(simSize) - 1), 0);
-}
-void main(){
-    ivec2 ic = ivec2(vUv * simSize);
-    vec4 o = fetch(ic);
-    vec4 n = fetch(ic + ivec2(0, 1));
-    vec4 e = fetch(ic + ivec2(1, 0));
-    vec4 s = fetch(ic - ivec2(0, 1));
-    vec4 w = fetch(ic - ivec2(1, 0));
-
-    float p = o.z;
-    if (o.w >= 0.0) {
-        //neumann boundary technique (check spelling?)
-        float pz = o.z;
-        float n2 = n.w >= 0.0 ? n.z : pz;
-        float e2 = e.w >= 0.0 ? e.z : pz;
-        float s2 = s.w >= 0.0 ? s.z : pz;
-        float w2 = w.w >= 0.0 ? w.z : pz;
-
-        float div = (e.x - w.x + n.y - s.y) / (1.99 * dx);
-        p = 0.25 * (n2 + e2 + s2 + w2 - dx * dx * div);
-    }
-    fragColor = vec4(o.xy, p, o.w);
-}
-`;
-
-const fluidGradientShader = `#version 300 es
-precision highp float;
-precision highp sampler2D;
-uniform sampler2D iChannel0;
-uniform float dx;
-uniform vec2 simSize;
-in vec2 vUv;
-out vec4 fragColor;
-
-vec4 fetch(ivec2 c){
-    return texelFetch(iChannel0, clamp(c, ivec2(0), ivec2(simSize) - 1), 0);
-}
-void main(){
-    ivec2 ic = ivec2(vUv * simSize);
-    vec4 o = fetch(ic);
-    vec4 n = fetch(ic + ivec2(0, 1));
-    vec4 e = fetch(ic + ivec2(1, 0));
-    vec4 s = fetch(ic - ivec2(0, 1));
-    vec4 w = fetch(ic - ivec2(1, 0));
-
-    vec2 grad = vec2(0.0);
-    if (o.w >= 0.0) {
-        // zero gradient across solid walls
-        grad = vec2(
-            (e.w >= 0.0 ? e.z : o.z) - (w.w >= 0.0 ? w.z : o.z),
-            (n.w >= 0.0 ? n.z : o.z) - (s.w >= 0.0 ? s.z : o.z)
-        );
-        grad *= 0.5;
-    }
-    fragColor = vec4(o.xy - grad, o.z, o.w);
-}
-`;
-
-const fluidMaskShader = `#version 300 es
-precision highp float;
-precision highp sampler2D;
-uniform sampler2D iChannel0;
-uniform vec2 simSize;
-in vec2 vUv;
-out vec4 fragColor;
-void main(){
-    float m = texelFetch(iChannel0, ivec2(vUv * simSize), 0).r;
-    fragColor = m > 0.5 ? vec4(0.0, 0.0, 0.0, -10.0) : vec4(0.0);
-}
-`;
-
+const fluidMaskShader = document.getElementById("fluidMaskShader").textContent;
+ 
 //Particles transform feedback
-const windParticleVertex = `#version 300 es
-precision highp float;
-precision highp sampler2D;
+const windParticleVertex = document.getElementById("windParticleVertex").textContent;
 
-in vec4 inData;
-out vec4 outData;
-
-uniform sampler2D iChannel0;  //fluid texture
-uniform vec2 simSize;
-uniform vec2 levelSize;  // level size (px)
-uniform float dt;
-uniform vec2 spawnCenter;   //camera position for wrap
-uniform vec2 spawnRadius;   //wrap radius
-
-out float vLife;
-
-float rnd(float seed){
-    return fract(sin(seed * 12.9898) * 43758.5453);
-}
-
-void main(){
-    vec4 p = inData;
-
-    //particle recycle
-    if (p.w <= 0.0 || p.x < 0.0) {
-        // vert id seed
-        float s = float(gl_VertexID) * 0.618034 + p.x * -0.0137 + spawnCenter.x * 0.0071;
-        float ang = rnd(s) * 6.28318;
-        float rad = sqrt(rnd(s + 17.0));
-        p.x = clamp(spawnCenter.x + cos(ang) * rad * spawnRadius.x, 0.0, levelSize.x);
-        p.y = clamp(spawnCenter.y + sin(ang) * rad * spawnRadius.y, 0.0, levelSize.y);
-        p.w = 0.3 + rnd(s + 2.0) * 0.7;
-    }
-
-    // sample the fluid field
-    ivec2 tc = ivec2(p.xy / (levelSize / simSize));
-    vec4 fluid = texelFetch(iChannel0, clamp(tc, ivec2(0), ivec2(simSize) - 1), 0);
-
-    // solid cells have no wind
-    vec2 vel = fluid.w >= 0.0 ? fluid.xy : vec2(0.0);
-
-    p.xy += vel * dt * 1.2;
-    p.w -= dt * 0.006;   // slowly burn out then respawn
-
-    outData = p;
-    vLife = p.w;
-}
-`;
-
-const windParticleFragment = `#version 300 es
-precision highp float;
-in float vLife;
-out vec4 fragColor;
-void main(){
-    //particle fade in and out
-    float fade = smoothstep(0.0, 0.15, vLife) * smoothstep(1.0, 0.85, vLife);
-    fragColor = vec4(0.9, 0.92, 1.0, fade * 0.08);
-}
-`;
+const windParticleFragment = document.getElementById("windParticleFragment").textContent;
 class GLContext {
     constructor(canvas, attribs) {
         this.canvas = canvas;
@@ -2030,7 +2010,9 @@ class RenderTarget {
             type,
             null,
         );
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        // mipmapped targets need a mipmap min filter to not throw errors webgl webgl webgl...
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER,
+            this.mipmapped ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
         gl.bindFramebuffer(gl.FRAMEBUFFER, this.framebuffer);
         gl.framebufferTexture2D(
@@ -2054,6 +2036,7 @@ class RenderTarget {
             gl.RENDERBUFFER,
             this.depthBuffer,
         );
+        gl.bindTexture(gl.TEXTURE_2D, null);
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     }
     bind() {
@@ -2098,13 +2081,24 @@ class PostProcess {
         gl.activeTexture(gl.TEXTURE8);
         gl.bindTexture(gl.TEXTURE_2D, source.texture);
         gl.uniform1i(this.iChannel, 8);
-        if (extra) {
-            gl.activeTexture(gl.TEXTURE9);
-            gl.bindTexture(gl.TEXTURE_2D, extra.texture);
-            gl.uniform1i(this.iChannel1, 9);
-        }
+        // Clannel 1 will always be bound to fix ghosting issue in compositor
+        gl.activeTexture(gl.TEXTURE9);
+        gl.bindTexture(gl.TEXTURE_2D, (extra ?? this.blackTarget).texture);
+        gl.uniform1i(this.iChannel1, 9);
         gl.bindVertexArray(this.vao);
         gl.drawArrays(gl.TRIANGLES, 0, 3);
+        // null to stop feedback error
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        gl.activeTexture(gl.TEXTURE9);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+        gl.activeTexture(gl.TEXTURE0);
+    }
+    //fallback for passes without a second input, better than the cyan stuff for this case
+    get blackTarget() {
+        if (!this._black) {
+            this._black = new RenderTarget(this.gl, { format: this.gl.RGBA16F }, { width: 1, height: 1 });
+        }
+        return this._black;
     }
 }
 class PassQuad {
@@ -2144,12 +2138,15 @@ class FluidSim {
         this.gl = glContext.gl;
         this.level = level;
 
-        this.width = level.width * 2;
-        this.height = level.height * 2;
+        this.width = level.width * 4;
+        this.height = level.height * 4;
+
+        // world pixels per sim texel (level.width*2 tiles * 64px / width)
+        this.texel = level.width * Level.tileSize / this.width;
 
         this.dt = options.dt ?? 1.0;//time step
         this.dx = options.dx ?? 1.0;// grid cell size
-        this.iterations = options.iterations ?? 3; // pressure iterations
+        this.iterations = options.iterations ?? 6; // pressure iterations
 
         this.passes = {
             advection: glContext.createProgram({
@@ -2225,12 +2222,14 @@ class FluidSim {
 
     buildMask() {
         const s = this.level.ground;
-        //Matches point/rectCollision exactly
         const cell = Level.tileSize * 0.5;
         for (let y = 0; y < this.height; y++) {
             for (let x = 0; x < this.width; x++) {
-                const row = s.data.length - y - 1;
-                const col = x - s.x;
+                // world position of this texel's center
+                const wx = (x + 0.5) * this.texel;
+                const wy = (y + 0.5) * this.texel;
+                const col = Math.floor(wx / cell) - s.x;
+                const row = s.data.length - 1 - Math.floor(wy / cell);
                 let solid = true;
                 if (row >= 0 && row < s.data.length && col >= 0 && col < s.data[0].length) {
                     const tile = s.data[row][col];
@@ -2286,6 +2285,9 @@ class FluidSim {
         });
         [this.ping, this.pong] = [this.pong, this.ping];
 
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+
         //leave undisturbed!
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -2298,8 +2300,8 @@ class FluidSim {
     //The wind can be sampled, prefer not to though.
     sample(x, y) {
         const gl = this.gl;
-        const tx = Math.min(this.width - 1, Math.max(0, Math.floor(x / (Level.tileSize * 0.5))));
-        const ty = Math.min(this.height - 1, Math.max(0, Math.floor(y / (Level.tileSize * 0.5))));
+        const tx = Math.min(this.width - 1, Math.max(0, Math.floor(x / this.texel)));
+        const ty = Math.min(this.height - 1, Math.max(0, Math.floor(y / this.texel)));
         const buf = new Float32Array(4);
         gl.bindFramebuffer(gl.FRAMEBUFFER, this.ping.framebuffer);
         gl.readPixels(tx, ty, 1, 1, gl.RGBA, gl.FLOAT, buf);
@@ -2311,7 +2313,7 @@ class FluidSim {
 class WindParticles {
     constructor(glContext, options = {}) {
         this.gl = glContext.gl;
-        this.count = options.count ?? 3000;
+        this.count = options.count ?? 1000;
 
         const gl = this.gl;
         const seed = new Float32Array(this.count * 4);
@@ -2350,9 +2352,9 @@ class WindParticles {
 
         this.cur = 0; //buffer index
         this.spawnCenter = [0, 0];
-        this.spawnRadius = [320, 180]; // default: roughly one screen around camera
+        this.spawnRadius = [320, 180]; //screen size
 
-        // --- update the TF
+        // update the TF
         const vs = this.compile(gl.VERTEX_SHADER, windParticleVertex);
         const fs = this.compile(gl.FRAGMENT_SHADER, windParticleFragment);
         this.updateProgram = gl.createProgram();
@@ -2415,6 +2417,7 @@ class WindParticles {
         gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
         gl.bindBuffer(gl.ARRAY_BUFFER, null);
         gl.bindVertexArray(null);
+        gl.bindTexture(gl.TEXTURE_2D, null);
         gl.activeTexture(gl.TEXTURE0);
 
         this.cur = dst;
@@ -2583,7 +2586,7 @@ const PhysUtils = {
         const iy2 = py - ry;
         const dotdv =
             ts.desiredVector.x * (ix1 - ix2) + ts.desiredVector.y * (iy1 - iy2);
-        //POSSIBLE PROBLEM LOOK HERE DONT FOREGET
+        //POSSIBLE PROBLEM LOOK HERE DONT FOREGET.  Note from later I have no clue what the problem could be or if it is still potential.
 
         return dotdv < 0 ? {
             x: ix1,
@@ -2936,6 +2939,63 @@ class Entity {
     }
     constructVertexArray() {
 
+        //each limb will fly apart, spin, and shrink to nothing
+        if (this.dying) {
+            const t = this.deathT;
+            const shrink = Math.max(0, 1 - t / 1.3);
+            for (var i = 0; i < this.limbs.length; i++) {
+                const limb = this.limbs[i];
+                // transformed relative to the rest positions
+                const cosR = Math.cos(limb.drot * t * 60);
+                const sinR = Math.sin(limb.drot * t * 60);
+                const dx = limb.dvx * t * 60 + Math.sin(t * 4 + i) * 6;
+                const dy = limb.dvy * t * 60 - 0.18 * (t * 60) * (t * 60) * 0.5;
+
+                for (var j = 0; j < 6; j++) {
+                    PhysUtils.rotateFromReference(
+                        point,
+                        this.templateNodes[limb.nodes[1]],
+                        this.nodes[limb.nodes[1]],
+                        this.templateNodes[limb.nodes[0]],
+                        this.nodes[limb.nodes[0]],
+                        limb.limbVerts[triOrder[j]],
+                        this.facing,
+                    );
+                    // shrink around the limbs own center
+                    const cx = point.x / 2;
+                    const cy = point.y / 2;
+                    // limb center in template space for a stable pivot
+                    const tcx = (limb.x + limb.w / 2);
+                    const tcy = (limb.y + limb.h / 2);
+                    point.x = tcx;
+                    point.y = tcy;
+                    PhysUtils.rotateFromReference(
+                        point,
+                        this.templateNodes[limb.nodes[1]],
+                        this.nodes[limb.nodes[1]],
+                        this.templateNodes[limb.nodes[0]],
+                        this.nodes[limb.nodes[0]],
+                        { x: tcx, y: tcy },
+                        this.facing,
+                    );
+                    const lx = point.x / 2;
+                    const ly = point.y / 2;
+
+                    const vx = cx - lx;
+                    const vy = cy - ly;
+
+                    // spin the vertex around the limb center an shrink
+                    const rx = vx * cosR - vy * sinR;
+                    const ry = vx * sinR + vy * cosR;
+
+                    this.vertices[i * 18 + j * 3] = lx + rx * shrink + dx;
+                    this.vertices[i * 18 + j * 3 + 1] = ly + ry * shrink + dy;
+                    this.vertices[i * 18 + j * 3 + 2] = this.z + this.uvs[i * 18 + j * 3 + 2] / 2000 - t * 0.1;
+                }
+            }
+            return;
+        }
+
         for (var i = 0; i < this.limbs.length; i++) {
             let limb = this.limbs[i];
             for (var j = 0; j < 6; j++) {
@@ -3232,6 +3292,7 @@ class Humanoid extends Entity {
     }
 }
 class ArachnidBoss extends Entity {
+    static loot={coin:3,webVial:1};
     constructor(x, y, z, name) {
         let previewNodes = [
             new Node(0, 100, "root", { x: 0, y: -1 }, [], "bodyRoot"),
@@ -3454,8 +3515,56 @@ class EntityHandler {
         this.entities.push(entity);
         return entity;
     }
+    startDeath(entity) {
+        entity.dying = true;
+        entity.deathT = 0;
+        // each limb gets its own impulse so the body bursts apart
+        for (const limb of entity.limbs) {
+            limb.dvx = (Math.random() - 0.5) * 7;
+            limb.dvy = Math.random() * 5 + 1.5;
+            limb.drot = (Math.random() - 0.5) * 0.35;
+        }
+        // loot drop
+        if (entity.loot) {
+            for (const [itemName, count] of Object.entries(entity.loot)) {
+                for (let i = 0; i < count; i++) {
+                    const cls = Item.registry[itemName];
+                    if (cls) {
+                        const item = new cls();
+                        worldItems.push(new WorldItem(item, entity.hitbox.cx, entity.hitbox.cy));
+                    }
+                }
+            }
+        }
+    }
     update() {
-        for (const entity of this.entities) {
+        for (let i = this.entities.length - 1; i >= 0; i--) {
+            const entity = this.entities[i];
+
+            // death check
+            if (entity.health !== undefined && entity.health <= 0 && !entity.dying) {
+                this.startDeath(entity);
+            }
+
+            if (entity.dying) {
+                entity.deathT += 1 / 60;
+                if (entity.deathT > 1.3) {
+                    if (entity === Player.entity) {
+                        //for the player show the death screen instead of removing him
+                        if (!Player.dead) {
+                            Player.dead = true;
+                            ui.pushScreen(deathScreen);
+                        }
+                        continue;
+                    }
+                    this.entities.splice(i, 1);
+                    continue;
+                }
+                //draw flying limbs
+                entity.constructVertexArray();
+                continue;
+            }
+
             entity.level=world.level;
             entity.updateHitbox?.();
             entity.updateNodes?.();
@@ -3571,6 +3680,46 @@ class Weapon {
         glparticles.add(this.vertices[6], this.vertices[7], 0.99, 0, 1, 1, 1);
         glparticles.add(this.vertices[9], this.vertices[10], 0.99, 0, 1, 1, 1);
     }
+
+    /*
+    Hit detection samples the blade's world-space vertices (plus midpoint)
+    against every other entity's hitbox. Damage/knockback only apply while
+    the attack is live with inputs.
+    */
+    checkHits(damage, kbScale) {
+        const v = this.vertices;
+        const samples = [
+            { x: v[0], y: v[1] },
+            { x: v[3], y: v[4] },
+            { x: (v[0] + v[3]) / 2, y: (v[1] + v[4]) / 2 },
+            { x: (v[0] + v[6]) / 2, y: (v[1] + v[7]) / 2 },
+            { x: v[9], y: v[10] },
+        ];
+
+        for (const ent of entityHandler.entities) {
+            if (ent === this.owner || !ent.hitbox) continue;
+
+            //per target cooldown
+            ent.hitCooldown = Math.max(0, (ent.hitCooldown ?? 0) - 1);
+            if (ent.hitCooldown > 0) continue;
+
+            const hb = ent.hitbox;
+            let hit = false;
+            for (const s of samples) {
+                if (
+                    s.x >= hb.x && s.x <= hb.x + hb.w &&
+                    s.y >= hb.y && s.y <= hb.y + hb.h
+                ) {
+                    hit = true;
+                    break;
+                }
+            }
+            if (!hit) continue;
+
+            ent.hitCooldown = 20;
+            this.onHit?.(ent, damage, kbScale);
+        }
+    }
     constructVertexArray() {
 
         for (var i = 0; i < 6; i++) {
@@ -3606,7 +3755,16 @@ console.warn("No render function for Attack from" + this.source.constructor.name
 class ProjectileAttack extends Attack{
     static renderFuncs={
         web:function(thi){
-
+            // a web is a clump of scattered particles
+            for (let i = 0; i < 10; i++) {
+                const ox = (Math.random() - 0.5) * 14;
+                const oy = (Math.random() - 0.5) * 14;
+                glparticles.add(
+                    thi.pos.x + ox, thi.pos.y + oy, thi.z ?? 1.0,
+                    2.2, 2.2, 2.4,            // bright pale color (blooms)
+                    0.55 + Math.random() * 0.25
+                );
+            }
         }
     }
     static damages={
@@ -3615,11 +3773,57 @@ class ProjectileAttack extends Attack{
     }
 constructor(source,type){
 super(source);
+this.type=type;
 this.pos={x:0,y:0};
 this.vel={x:0,y:0};
+this.life=1;
+this.active=false;
 
 }
+fire(x,y,vx,vy){
+    this.pos={x,y};
+    this.vel={x:vx,y:vy};
+    this.life=1;
+    this.active=true;
 }
+update(){
+    if(!this.active) return;
+
+    const dt=1;
+    this.vel.y -= 0.05 * dt;
+    this.vel.x *= 0.985;
+    this.vel.y *= 0.995;
+    this.pos.x += this.vel.x * dt;
+    this.pos.y += this.vel.y * dt;
+    this.life -= 0.006 * dt;
+
+    // hit the player
+    const plr = Player.entity.hitbox;
+    if (
+        this.pos.x >= plr.x && this.pos.x <= plr.x + plr.w &&
+        this.pos.y >= plr.y && this.pos.y <= plr.y + plr.h
+    ) {
+        Player.damage(ProjectileAttack.damages[this.type] ?? 10);
+
+        plr.xv *= 0.3;
+        this.active=false;
+        return;
+    }
+
+    // hit level geometry
+    if (world.level.pointCollision(this.pos.x, this.pos.y)) {
+        this.active=false;
+        return;
+    }
+
+    //dead
+    if (this.life <= 0) this.active=false;
+}
+render(){
+    if(!this.active) return;
+    ProjectileAttack.renderFuncs[this.type]?.(this);
+}
+}  
 class MeleeAttack extends Attack{
 constructor(source,type){
 super(source);
@@ -3764,7 +3968,7 @@ class PlayerAttack {
                 this.damageMult *= pattern.damageMult ?? 1;
                 this.defenceMult *= pattern.defenceMult ?? 1;
 
-                this.damageMult=Math.max(this.damageMult,10);
+                this.damageMult=Math.min(this.damageMult,10);
 
                 return name;
             }
@@ -3772,7 +3976,7 @@ class PlayerAttack {
     }
 
     return null;
-    }
+    } 
 
     update() {
 
@@ -3789,6 +3993,26 @@ class PlayerAttack {
             this.player.hand.x+=this.hand.xv;
             this.player.hand.y+=this.hand.yv;
             this.player.tilt += (pose.tilt-this.player.tilt)*0.14;
+
+            //check sword hits
+            // fine for 60fps combat ig
+            const sword = Player.sword;
+            if (sword) {
+                sword.onHit = (ent, damage, kbScale) => {
+                    const hb = ent.hitbox;
+                    const plr = this.player.hitbox;
+                    // knockback away from the player, scaled by pose mult
+                    const dx = hb.cx - plr.cx;
+                    const dy = hb.cy - plr.cy;
+                    const len = Math.hypot(dx, dy) || 1;
+                    ent.hitbox.xv += dx / len * 3 * kbScale;
+                    ent.hitbox.yv += (dy / len * 1.5 + 2) * kbScale;
+                    ent.health = (ent.health ?? 100) - damage;
+                    gameUI.damage(ent, Math.max(ent.health + damage, 100));
+                };
+                const baseDamage = 10 * this.damageMult;
+                sword.checkHits(baseDamage, pose.mult ?? 1);
+            }
         }else{
             this.hand.xv += (-this.player.hand.x)*0.1;
             this.hand.yv += ( -0.1-this.player.hand.y)*0.1;
@@ -3902,25 +4126,163 @@ class Particle {
 }
 
 
+const worldItems = [];
+
+//contact damage and projectiles, soon some AI for movement and dodging.
+const enemyProjectiles = [];
+function arachnidAI(spider) {
+    if (spider.dying || Player.dead) return;
+    const sp = spider.hitbox, plr = Player.entity.hitbox;
+
+
+    sp.xv = Math.sin(frameCount * 0.02) * 0.6;
+
+
+    spider.contactCd = Math.max(0, (spider.contactCd ?? 0) - 1);
+    if (
+        spider.contactCd <= 0 &&
+        sp.x < plr.x + plr.w && sp.x + sp.w > plr.x &&
+        sp.y < plr.y + plr.h && sp.y + sp.h > plr.y
+    ) {
+        // push player away from the spider
+        const dx = plr.cx - sp.cx, dy = plr.cy - sp.cy;
+        const len = Math.hypot(dx, dy) || 1;
+        plr.xv += dx / len * 4;
+        plr.yv += 2.5;
+        Player.damage(12);
+        spider.contactCd = 60;
+    }
+
+    //more often web throws when close
+    spider.webCd = Math.max(0, (spider.webCd ?? 90) - 1);
+    const dist = Math.hypot(plr.cx - sp.cx, plr.cy - sp.cy);
+    if (spider.webCd <= 0 && dist < 500) {
+        const web = new ProjectileAttack(spider, "web");
+        //ballistic equations so cool
+        const T = 40;
+        const vx = (plr.cx - sp.cx) / T;
+        const vy = (plr.cy - sp.cy) / T + 0.05 * T / 2;// counteract gravity!
+        web.fire(sp.cx, sp.cy + sp.h * 0.5, vx, vy);
+        enemyProjectiles.push(web);
+        spider.webCd = dist < 200 ? 90 : 180;
+    }
+}
+
 class Inventory{
     constructor(size){
         this.items=new Array(size);
         this.items.fill(null);
     }
+    add(item){
+        const idx=this.items.indexOf(null);
+        if(idx===-1) return false; // full
+        this.items[idx]=item;
+        item.inInventory=true;
+        return true;
+    }
+    count(name){
+        return this.items.filter(i=>i?.name===name).length;
+    }
+    remove(name,num=1){
+        let left=num;
+        for(let i=0;i<this.items.length&&left>0;i++){
+            if(this.items[i]?.name===name){
+                this.items[i]=null;
+                left--;
+            }
+        }
+        return num-left; // how many actually removed
+    }
 }
+
 class Item {
     constructor(name,num=1){
         this.name=name;
+        this.num=num;
         this.inInventory=false;
     }
-    pickup(inv){
-        let chk=inv.items.indexOf(null);
-        if(chk){
-            inv.items[chk]=this;
-            this.inInventory=true;
-        }
+    static registry={};
+    static register(cls){
+        Item.registry[cls.prototype.name??cls.name]=cls;
+    }
+    pickup(inv=Player.inventory){
+        if(!inv.add(this)) return false;
+        this.inInventory=true;
+        return true;
+    }
+    drop(x,y){
+        worldItems.push(new WorldItem(this,x,y));
+        this.inInventory=false;
     }
 }
+//Item in the world as opposed to the inventory one
+class WorldItem {
+    constructor(item,x,y){
+        this.item=item;
+        this.x=x;
+        this.y=y;
+        this.xv=(Math.random()-0.5)*2;
+        this.yv=3;
+        this.t=Math.random()*100;
+        this.life=Infinity; // despawn time if I ever want it.
+    }
+    update(){
+        this.t++;
+        this.xv*=0.96;
+        this.yv-=0.12;
+        this.x+=this.xv;
+        this.y+=this.yv;
+        if(world.level.pointCollision(this.x,this.y)){
+            // step back and bounce
+            this.x-=this.xv;
+            this.y-=this.yv;
+            this.yv*=-0.4;
+            this.xv*=0.7;
+        }
+        this.life--;
+
+        // pickup
+        const plr=Player.entity.hitbox;
+        if(
+            this.x>=plr.x&&this.x<=plr.x+plr.w&&
+            this.y>=plr.y&&this.y<=plr.y+plr.h
+        ){
+            if(this.item.pickup()) this.life=0;
+            // if inventory full, stay on the ground
+        }
+
+        //render
+        const bob=Math.sin(this.t*0.08)*3;
+        const c=Item.colors?.[this.item.name]??[3.5,3.0,1.2];
+        glparticles.add(this.x,this.y+bob+8,1.002,c[0],c[1],c[2],0.95);
+    }
+}
+Item.colors={
+    coin:[3.5,2.8,0.9],
+    healthPotion:[3.5,0.8,0.8],
+    webVial:[2.2,3.5,2.4],
+};
+// concrete item types (registered so loot tables can reference them by name)
+class Coin extends Item{
+    constructor(){super("coin",1);}
+}
+class HealthPotion extends Item{
+    constructor(){super("healthPotion",1);}
+    pickup(inv=Player.inventory){
+        // consume immediately: heal and never occupy a slot
+        Player.entity.health=Math.min(Player.entity.maxHealth,(Player.entity.health??100)+30);
+        gameUI.playerHit(); // reuse the flash, but make it green
+        return true;
+    }
+}
+class WebVial extends Item{
+    constructor(){super("webVial",1);}
+}
+Item.registry={
+    coin:Coin,
+    healthPotion:HealthPotion,
+    webVial:WebVial,
+};
 
 
 class TileSet {
@@ -3942,11 +4304,14 @@ class Level {
     static tileSize = 64;
     static changeRoom(ind){
     const via=world.level.zones.vias[ind];
-
+    // black fade transition
+    roomFader.run(() => Level.doChangeRoom(via,ind));
+    }
+    static doChangeRoom(via,ind){
     const ta = via.destination;
     const s= world.levels[ta].ground;
 
-    let found=false;
+    let found=false; 
     for (let row = 0; row < s.data.length; row++) {
         for (let col = 0; col < s.data[row].length; col++) {
             if (s.data[row][col] === ind) {
@@ -3969,6 +4334,8 @@ class Level {
     }
 
     Player.inRoomTransition=true;
+    // music for the new room
+    audioManager.play(world.levelInd);
     }
     constructor(name, slices,tileset,zones={}) {
         this.name = name;
@@ -4101,8 +4468,8 @@ class Level {
                     let z1 = slice.z;
                     const u0 = tile.x;
                     const v0 = tile.y;
-                    const u1 = u0 + tile.w;
-                    const v1 = v0 + tile.h;
+                    const u1 = u0 + tile.w-0.1;
+                    const v1 = v0 + tile.h-0.1;
                     vb.push(x1, y1, z1, x1 + tile.w * 0.5, y1, z1, x1, y1 + tile.h * 0.5, z1, x1 + tile.w * 0.5, y1, z1, x1 + tile.w * 0.5, y1 + tile.h * 0.5, z1, x1, y1 + tile.h * 0.5, z1, );
                     ub.push(u0, v1, z1, u1, v1, z1, u0, v0, z1, u1, v1, z1, u1, v0, z1, u0, v0, z1, );
                 }
@@ -4144,7 +4511,7 @@ worldMesh.setAttribute("uv", meshData.uv);
         this.fluidSim = new FluidSim(gfx, lev);
     }
 }
-}
+} 
 
 class Camera {
     constructor(target = null) {
@@ -4342,8 +4709,8 @@ const entitiesMesh = gfx.createMesh({
 const sceneTarget = gfx.createRenderTarget({
     format: gl.RGBA16F
 });
-const ping = gfx.createRenderTarget();
-const pong = gfx.createRenderTarget();
+const ping = gfx.createRenderTarget({ mipmap: true });
+const pong = gfx.createRenderTarget({ mipmap: true });
 const bloomPass = gfx.createPostProcess({
     vertex: document.getElementById("ppfxDefault").textContent,
     fragment: document.getElementById("bloom-shader").textContent,
@@ -4605,6 +4972,7 @@ for (var i = 0; i < 1; i++) {
 let Player = {};
 Player.entity = entityHandler.entities[0];
 Player.attack=new PlayerAttack(Player.entity);
+Player.inventory = new Inventory(10);
 Player.update=function(){
   if (input.up() && Player.entity.hitbox.onGround) {
             Player.entity.hitbox.yv = 4.2;
@@ -4617,6 +4985,46 @@ Player.update=function(){
 }
 Player.inRoomTransition=false;
 Player.pinRoomTransition=false;
+Player.dead=false;
+Player.entity.health = 100;
+Player.entity.maxHealth = 100;
+Player.entity.iframes = 0;
+Player.damage=function(amount){
+    const p = Player.entity;
+    if (Player.dead || p.dying) return;
+    // i- frames so one contact doesn't drain the whole bar
+    if (p.iframes > 0) return;
+    p.iframes = 45;
+    p.health = (p.health ?? 100) - amount;
+    // knockback away from the damage source direction is applied by caller
+    gameUI.playerHit();
+    if (p.health <= 0) {
+        Player.dead = true;
+        entityHandler.startDeath(p);
+    }
+};
+Player.respawn=function(){
+    const p = Player.entity;
+    // reset body and health
+    p.health = 100;
+    p.dying = false;
+    Player.dead = false;
+    p.deathT = 0;
+    p.translate(256, 32);
+    p.hitbox.xv = 0;
+    p.hitbox.yv = 0;
+    // rebuild limb transform state
+    for (const node of p.nodes) {
+        const t = p.templateNodes[p.nodes.indexOf(node)];
+        node.x = t.x;
+        node.y = t.y;
+    }
+    //reset limb positions
+    p.pickInitFunction("arm")(p, 6);
+    p.pickInitFunction("arm")(p, 7);
+    p.pickInitFunction("leg")(p, 12);
+    p.pickInitFunction("leg")(p, 13);
+};
 //(owner,node1,node2, x,y,w,h)
 Player.sword = new Weapon(Player.entity, 6, 4, 0, 1, 32, 64, "rustySword");
 entityHandler.add(Player.sword);
@@ -4661,12 +5069,26 @@ void main() {
 });
 const windDrawCamMat = windDrawProgram.uniform("camera");
 const windDrawSizeLoc = windDrawProgram.uniform("size");
-const windParticles = new WindParticles(gfx, { count: 3000 });
+const windParticles = new WindParticles(gfx, { count: 2500 });
 
 const maxLights = 8;
 const lightUniformData = new Float32Array(maxLights * 3);
 
 const camera = new Camera(Player.entity.hitbox);
+
+const gameUI = new GameUI(gctx);
+
+
+
+// mp3s in ./music/
+// Keys are level names, menus use 'menu'
+const audioManager = new AudioManager({
+    bank: "music/bankTheme.mp3",
+    room_1: "music/storageTheme.mp3",
+    menu: "music/menuTheme.mp3",
+}, 1.5);
+const roomFader = new Fader();
+const menuFader = new Fader();
 
 var player = {
     x: 0,
@@ -4758,8 +5180,11 @@ mainMenu.add(
         font: "body",
         style:{radius:8},
         onActivate: () => {
-        uiShortcuts.bindGameScreen();
-        ui.setScreen(gameScreen);
+        menuFader.run(() => {
+            uiShortcuts.bindGameScreen();
+            ui.setScreen(gameScreen);
+            audioManager.play(world.levelInd);
+        });
     }
     }),
 
@@ -4768,7 +5193,7 @@ mainMenu.add(
         textAlign: "left",
         font: "small",
         style:{radius:8},
-        onActivate: () => {ui.pushScreen(settingsScreen);uiShortcuts.bindSettingsScreen();}
+        onActivate: () => {menuFader.run(() => {ui.pushScreen(settingsScreen);uiShortcuts.bindSettingsScreen();});audioManager.play("menu");}
     })
 );
 let backArtImage=await atlas.setImage(backArtSRC)
@@ -4815,10 +5240,10 @@ gameScreen.addUpdater((input, ui, screen) => {
         gl.uniform3fv(glLights, lightUniformData);
         gl.uniform1f(iTime, performance.now());
 
-        //fluid stuff
-        {
+        //fluid stuff (purely visual air currents; skipped when particles are off)
+        if (graphicsSettings.particles) {
             windUniformData.fill(0);
-            // WIND EMITTERS DISABLED FOR TUNING
+            // WIND EMITTERS DISABLED FOR NOW
             // zones.wind entries: [x, y, vx, vy] in level pixels (y up).
             // const winds = world.level.zones.wind;
             // if (winds) {
@@ -4832,20 +5257,11 @@ gameScreen.addUpdater((input, ui, screen) => {
             //     }
             // }
             const plr = Player.entity.hitbox;
-            // 1 sim texel = half a tile = 32 px (2 texels per 64px tile).
-            // Fluid velocities are in texels/step: convert from px/frame.
-            const TEXEL = Level.tileSize * 0.5; // 32 px per texel
+            const sim = world.fluidSim;
+            const TEXEL = sim.texel; // world px per sim texel (16 at 4x res)
             const stirX = (plr.x + plr.w * 0.5) / TEXEL;
             const stirY = (plr.y + plr.h * 0.5) / TEXEL;
-            const sim = world.fluidSim;
-            sim.step(windUniformData, [stirX, stirY, plr.xv / TEXEL*100, plr.yv / TEXEL]);
-
-            // push the player with the local air velocity (texels -> px)
-            const wind = sim.sample(stirX, stirY);
-            if (wind && (Math.abs(wind.x) > 0.01 || Math.abs(wind.y) > 0.01)) {
-                plr.xv += wind.x * TEXEL * 0.002;
-                plr.yv += wind.y * TEXEL * 0.002;
-            }
+            sim.step(windUniformData, [stirX, stirY, plr.xv / TEXEL * 6, plr.yv / TEXEL * 6]);
 
             //gpu advect
             windParticles.spawnCenter = [camera.x, camera.y];
@@ -4853,10 +5269,14 @@ gameScreen.addUpdater((input, ui, screen) => {
             windParticles.step(sim, 1.0);
         }
 
-        for (var i = 0; i < 1; i++) {
-            entityHandler.entities[i + 1].hitbox.xv = Math.sin(i + frameCount * 0.02)
+        //run enemy AI
+        if (entityHandler.entities[1] instanceof ArachnidBoss) {
+            arachnidAI(entityHandler.entities[1]);
         }
         Player.update();
+
+        // player i-frames
+        if (Player.entity.iframes > 0) Player.entity.iframes--;
         //console.log(input.ls)
         glparticles.clear();
     if(world.levelInd!="bank"){
@@ -4873,6 +5293,27 @@ gameScreen.addUpdater((input, ui, screen) => {
             if (part.fade < 0) {
                 particles[i] = particles[particles.length - 1];
                 particles.length--;
+            }
+        }
+
+        // enemy projectiles
+        for (let i = enemyProjectiles.length - 1; i >= 0; i--) {
+            const proj = enemyProjectiles[i];
+            proj.update();
+            proj.render();
+            if (!proj.active) {
+                enemyProjectiles[i] = enemyProjectiles[enemyProjectiles.length - 1];
+                enemyProjectiles.length--;
+            }
+        }
+
+        //world item pickups
+        for (let i = worldItems.length - 1; i >= 0; i--) {
+            const wi = worldItems[i];
+            wi.update();
+            if (wi.life <= 0) {
+                worldItems[i] = worldItems[worldItems.length - 1];
+                worldItems.length--;
             }
         }
         //entityHandler.debugDraw();
@@ -4903,7 +5344,7 @@ gameScreen.addUpdater((input, ui, screen) => {
         glparticles.draw();
 
         //draw ambient motes
-        if (graphicsSettings.windParticles) {
+        if (graphicsSettings.particles) {
             gl.useProgram(windDrawProgram.program);
             gl.uniform3fv(windDrawCamMat, [camera.x, camera.y, camera.z]);
             gl.uniform1f(windDrawSizeLoc, 2.0);
@@ -4911,27 +5352,37 @@ gameScreen.addUpdater((input, ui, screen) => {
         }
         sceneTarget.unbind();
 
-        bloomPass.render(sceneTarget, ping);
-        bloomPass.render(ping, pong);
-        //TableTennis.  I was told by jakeK that no for loops are allowed here cause it looks funny.
-        if (!true) {
+        if (graphicsSettings.bloom) {
+            bloomPass.render(sceneTarget, ping);
             bloomPass.render(ping, pong);
-            bloomPass.render(pong, ping);
-            bloomPass.render(ping, pong);
-            bloomPass.render(pong, ping);
-            bloomPass.render(ping, pong);
-            bloomPass.render(pong, ping);
-            bloomPass.render(ping, pong);
-            bloomPass.render(pong, ping);
-            bloomPass.render(ping, pong);
-            bloomPass.render(pong, ping);
+            //TableTennis.  I was told by jakeK that no for loops are allowed here cause it looks funny.
+            if (true) {
+                bloomPass.render(ping, pong);
+                bloomPass.render(pong, ping);
+                bloomPass.render(ping, pong);
+                bloomPass.render(pong, ping);
+                bloomPass.render(ping, pong);
+                bloomPass.render(pong, ping);
+                bloomPass.render(ping, pong);
+                bloomPass.render(pong, ping);
+                bloomPass.render(ping, pong);
+                bloomPass.render(pong, ping);
+            }
         }
         //bloomPass.render(pong, ping);
-        compPass.render(sceneTarget, null, ping);
+        compPass.render(sceneTarget, null, graphicsSettings.bloom ? ping : null);
         ctx.fillStyle = "rgb(0,0,0)";
         gctx.fillRect(0, 0, 600, 600);
 
         gctx.drawImage(gfx.canvas, 0, 0, 640, 360);
+
+        //game HUD (health bars etc.) drawn on top of the frame
+        gameUI.update();
+        gameUI.draw(camera);
+
+        //transition overlays on top of everything
+        roomFader.update();
+        roomFader.draw(gctx);
 });
 
 
@@ -4996,8 +5447,8 @@ function addToggle(menu, label, property) {
   
 const graphicsSettings = {
     showFPS: true,
-    bloom: true,
-    particles: true,
+    bloom: !true,
+    particles: true, 
     windParticles: true
 };
 addToggle(graphicsMenu, "Show FPS", "showFPS");
@@ -5015,23 +5466,46 @@ const audioMenu = makeMenu(
 const settingsScreen = makeMenu(
     "Settings",
     makeButton("Resume", () => {
+        menuFader.run(() => {
         ui.popScreen();
         if(ui.screenStack[ui.screenStack.length-1]==gameScreen){
             uiShortcuts.bindGameScreen();
+            audioManager.play(world.levelInd);
         }else if(ui.screenStack[ui.screenStack.length-1]==root){
             ui.unbindAllShortcuts();
+            audioManager.play("menu");
         }
+        });
     }),
     makeButton("Graphics", () => ui.pushScreen(graphicsMenu)),
     makeButton("Audio", () => ui.pushScreen(audioMenu)),
     makeButton("Quit to Main Menu", () => {
+        menuFader.run(() => {
         ui.unbindAllShortcuts();
+        ui.setScreen(root);
+        audioManager.play("menu");
+        });
+    })
+);
+
+//respawn at the OG spawn point for now
+const deathScreen = makeMenu(
+    "You Died",
+    makeButton("Respawn", () => {
+        Player.respawn();
+        ui.setScreen(gameScreen);
+        uiShortcuts.bindGameScreen();
+    }), 
+    makeButton("Quit to Main Menu", () => {
+        ui.unbindAllShortcuts();
+        Player.respawn(); // restore the player so the game isn't stuck dead
         ui.setScreen(root);
     })
 );
 
 ui.setScreen(root);
 ui.render();
+audioManager.play("menu"); //start music
 
 
 var frameCount = 0;
@@ -5053,6 +5527,15 @@ function draw(now) {
         ui.update(input);
       
         ui.render();
+
+        //transitions and audio run globally
+        audioManager.update();
+        roomFader.update();
+        menuFader.update();
+        //draw whichever overlay is active on the visible canvas
+        menuFader.draw(ctx);
+        if (roomFader.active) menuFader.draw(ctx);
+
         ctx.fillStyle = "rgb(200,200,200)";
         ctx.font = "10px Jersey 10";
         ctx.fillText(Math.ceil(1000 / dt), 10, 10);
