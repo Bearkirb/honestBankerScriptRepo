@@ -1,3 +1,4 @@
+await loadScripts();
 //MATH
 
 (() => {
@@ -4994,7 +4995,7 @@ class Camera {
 }
 
 
-await loadScripts();
+
 const c = document.getElementById("m"), ctx = c.getContext("2d");
 
 ctx.imageSmoothingEnabled = false;
@@ -6075,7 +6076,7 @@ function draw(now) {
         ctx.fillText(Math.ceil(1000 / dt), 10, 10);
        
         input.updatePost()
-        if (capturer) capturer.capture(c);
+        if (typeof capturer !== "undefined") capturer.capture(c);
         frameCount++;
         ImpactEffect.update();
         if (now > nextFrame + frameTime) {

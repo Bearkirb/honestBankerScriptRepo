@@ -50,11 +50,10 @@ async function loadScripts(){
         "UIAssets.js",
         "testTilemaps.js",
     ];
-
+ 
     for (const file of scripts) {
         const script = document.createElement("script");
         script.src = base + file;
-
         await new Promise((resolve, reject) => {
             script.onload = resolve;
             script.onerror = () =>
