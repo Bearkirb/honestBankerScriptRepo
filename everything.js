@@ -1,4 +1,5 @@
 //MATH
+
 (() => {
     const MathExtended = {
         lerp(a,b,t){
@@ -886,7 +887,7 @@ class AudioManager {
             this.gap = this.gapTime;
             return;
         }
-        this.startTrack(name);
+        //this.startTrack(name);
     }
     startTrack(name) {
         const next = this.get(name);
@@ -2041,13 +2042,16 @@ class RenderTarget {
     }
     bind() {
         this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.framebuffer);
-        if (this.mipmapped) {
-            this.gl.generateMipmap(this.gl.TEXTURE_2D);
-        }
         this.gl.clear(this.gl.COLOR_BUFFER_BIT | this.gl.DEPTH_BUFFER_BIT);
     }
     unbind() {
         this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
+        // mipmaps must be regenerated after the pass has drawn.  more webgl weirdness.  Not really its just so not airtight
+        if (this.mipmapped) {
+            this.gl.bindTexture(this.gl.TEXTURE_2D, this.texture);
+            this.gl.generateMipmap(this.gl.TEXTURE_2D);
+            this.gl.bindTexture(this.gl.TEXTURE_2D, null);
+        }
     }
 }
 class PostProcess {
@@ -2087,13 +2091,15 @@ class PostProcess {
         gl.uniform1i(this.iChannel1, 9);
         gl.bindVertexArray(this.vao);
         gl.drawArrays(gl.TRIANGLES, 0, 3);
+        // release the target
+        if (target) target.unbind();
         // null to stop feedback error
         gl.bindTexture(gl.TEXTURE_2D, null);
         gl.activeTexture(gl.TEXTURE9);
         gl.bindTexture(gl.TEXTURE_2D, null);
         gl.activeTexture(gl.TEXTURE0);
     }
-    //fallback for passes without a second input, better than the cyan stuff for this case
+    //fallback for passes without a second input, better than the magenta stuff for this case
     get blackTarget() {
         if (!this._black) {
             this._black = new RenderTarget(this.gl, { format: this.gl.RGBA16F }, { width: 1, height: 1 });
@@ -2872,7 +2878,8 @@ class Entity {
         this.hitbox.x += dx;
         this.hitbox.y += dy;
 
-        if (!level.rectCollision(this.hitbox)) return;
+        // pass myself so tile hit events (room transitions etc.) know who touched them
+        if (!level.rectCollision(this.hitbox, this)) return;
 
         if (dx) {
             const sx = Math.sign(dx);
@@ -3226,8 +3233,8 @@ class Humanoid extends Entity {
  const aim = input.rs.x;
         const move = this.hitbox.xv;
 
-        const aimDeadzone = 6.0;
-        const moveDeadzone = 1.1;
+        const aimDeadzone = 7.5;
+        const moveDeadzone = 3.5;
 
         const aimActive = Math.abs(aim) > aimDeadzone;
         const moveActive = Math.abs(move) > moveDeadzone;
@@ -3236,7 +3243,7 @@ class Humanoid extends Entity {
             this.targetFacing = Math.sign(aim);
         } else if (moveActive) {
             this.targetFacing = Math.sign(move);
-        }
+        } 
 
         // turn speed
         const turnSpeed = aimActive ? 0.16 : 0.06;
@@ -3292,7 +3299,7 @@ class Humanoid extends Entity {
     }
 }
 class ArachnidBoss extends Entity {
-    static loot={coin:3,webVial:1};
+    static loot={gold:1,mysteriousKey:1,webVial:1};
     constructor(x, y, z, name) {
         let previewNodes = [
             new Node(0, 100, "root", { x: 0, y: -1 }, [], "bodyRoot"),
@@ -3364,6 +3371,8 @@ class ArachnidBoss extends Entity {
         }
         this.hitbox.hh = this.hitbox.h;
         this.tic = 0;
+        // very heavy: sword knockback moves it 1/3 as far as a normal enemy
+        this.mass = 3;
     }
     displayHitbox() {
         let hb = this.hitbox;
@@ -3524,9 +3533,10 @@ class EntityHandler {
             limb.dvy = Math.random() * 5 + 1.5;
             limb.drot = (Math.random() - 0.5) * 0.35;
         }
-        // loot drop
-        if (entity.loot) {
-            for (const [itemName, count] of Object.entries(entity.loot)) {
+        // loot drop.  loot may live on the instance or as a static on the enemy
+        const lootTable = entity.loot ?? entity.constructor?.loot;
+        if (lootTable) {
+            for (const [itemName, count] of Object.entries(lootTable)) {
                 for (let i = 0; i < count; i++) {
                     const cls = Item.registry[itemName];
                     if (cls) {
@@ -3761,7 +3771,7 @@ class ProjectileAttack extends Attack{
                 const oy = (Math.random() - 0.5) * 14;
                 glparticles.add(
                     thi.pos.x + ox, thi.pos.y + oy, thi.z ?? 1.0,
-                    2.2, 2.2, 2.4,            // bright pale color (blooms)
+                    2.2, 2.2, 2.4,            // bright pale color
                     0.55 + Math.random() * 0.25
                 );
             }
@@ -4001,12 +4011,14 @@ class PlayerAttack {
                 sword.onHit = (ent, damage, kbScale) => {
                     const hb = ent.hitbox;
                     const plr = this.player.hitbox;
-                    // knockback away from the player, scaled by pose mult
+                    // knockback away from the player, scaled by pose mult.
+                    
                     const dx = hb.cx - plr.cx;
                     const dy = hb.cy - plr.cy;
                     const len = Math.hypot(dx, dy) || 1;
-                    ent.hitbox.xv += dx / len * 3 * kbScale;
-                    ent.hitbox.yv += (dy / len * 1.5 + 2) * kbScale;
+                    const mass = ent.mass ?? 1;
+                    ent.hitbox.xv += dx / len * 3 * kbScale / mass;
+                    ent.hitbox.yv += (dy / len * 1.5 + 2) * kbScale / mass;
                     ent.health = (ent.health ?? 100) - damage;
                     gameUI.damage(ent, Math.max(ent.health + damage, 100));
                 };
@@ -4128,40 +4140,144 @@ class Particle {
 
 const worldItems = [];
 
-//contact damage and projectiles, soon some AI for movement and dodging.
+//contact damage and projectiles.
 const enemyProjectiles = [];
+/*
+
+  stalk: slow circling approach that keeps distance
+  stampede: short burst charge straight at the player
+  flee: scurries away when hurt or after a burst
+  leap: pounce jump over the player
+It always throws webs on its cooldown while any state is active.
+*/
 function arachnidAI(spider) {
     if (spider.dying || Player.dead) return;
     const sp = spider.hitbox, plr = Player.entity.hitbox;
 
+    const dx = plr.cx - sp.cx;
+    const dy = plr.cy - sp.cy;
+    const dist = Math.hypot(dx, dy) || 1;
+    const dir = Math.sign(dx) || 1;
 
-    sp.xv = Math.sin(frameCount * 0.02) * 0.6;
+
+    const los = world.level.raycast(sp.cx, sp.cy, dx / dist, dy / dist);
+    const seen = !los || los.distance >= dist;
+    if (seen) {
+        spider.lastSeenX = plr.cx;
+        spider.lastSeenY = plr.cy;
+        spider.alert = true;
+    }
+
+    spider.aiTimer = (spider.aiTimer ?? 0) - 1;
 
 
+    if (spider.aiState == null || spider.aiTimer <= 0) {
+        // just took a hit
+        if ((spider.health ?? 100) < (spider.lastSeenHealth ?? 100)) {
+            spider.aiState = "flee";
+            spider.aiTimer = 60 + Math.random() * 60;
+        } else if (spider.aiState === "stampede") {
+            // stampede ends in flee
+            spider.aiState = "flee";
+            spider.aiTimer = 50 + Math.random() * 40;
+        } else {
+            const roll = Math.random();
+            if (seen && dist > 210 && roll < 0.35) {
+                spider.aiState = "stampede";
+                spider.aiTimer = 50 + Math.random() * 40;
+            } else if (seen && roll < 0.75 && sp.onGround) {
+                spider.aiState = "leap";
+                spider.aiTimer = 30; // windup before the jump
+            } else if (seen) {
+                spider.aiState = "stalk";
+                spider.aiTimer = 90 + Math.random() * 90;
+            } else {
+                // lost the player
+                spider.aiState = "search";
+                spider.aiTimer = 120;
+            }
+        }
+        spider.lastSeenHealth = spider.health ?? 100;
+    }
+
+
+    switch (spider.aiState) {
+        case "stalk": {
+            // slow sideways
+            const desired = dist > 200 ? 1.1 : Math.sin(frameCount * 0.03) * 0.8;
+            sp.xv += dir * desired * 0.08;
+            sp.xv *= 0.95;
+            break;
+        }
+        case "search": {
+            // can't see the player
+            const sdx = (spider.lastSeenX ?? sp.cx) - sp.cx;
+            const sdir = Math.sign(sdx) || 1;
+            sp.xv += sdir * 0.5 * 0.08;
+            sp.xv *= 0.94;
+            // flip around now and then so it reads as "looking for you"
+            if (frameCount % 90 === 0) spider.lastSeenX = sp.cx + (Math.random() - 0.5) * 200;
+            break;
+        }
+        case "stampede": {
+            // full speed charge
+            sp.xv += dir * 0.35;
+            sp.xv = Math.max(-3.5, Math.min(3.5, sp.xv));
+            // little dust kicks while charging
+            if (frameCount % 4 === 0 && sp.onGround) {
+                glparticles.add(sp.cx - dir * 20, sp.y, 1.0, 1.6, 1.4, 1.1, 0.5);
+            }
+            break;
+        }
+        case "flee": {
+            // scurry away
+            sp.xv += -dir * 0.2;
+            sp.xv = Math.max(-3, Math.min(3, sp.xv));
+            break;
+        }
+        case "leap": {
+            sp.xv *= 0.85;
+            if (spider.aiTimer <= 1 && sp.onGround) {
+                sp.yv = 7.5;
+                // ballistic aim
+                sp.xv = dx / 14;
+                spider.leapCd = 120;
+                // land impact shake
+                gameUI.playerHurtFlash = 0;
+            }
+            break;
+        }
+    }
+
+    // contact damag
     spider.contactCd = Math.max(0, (spider.contactCd ?? 0) - 1);
     if (
         spider.contactCd <= 0 &&
+        spider.aiState !== "flee" &&
         sp.x < plr.x + plr.w && sp.x + sp.w > plr.x &&
         sp.y < plr.y + plr.h && sp.y + sp.h > plr.y
     ) {
         // push player away from the spider
-        const dx = plr.cx - sp.cx, dy = plr.cy - sp.cy;
-        const len = Math.hypot(dx, dy) || 1;
-        plr.xv += dx / len * 4;
-        plr.yv += 2.5;
-        Player.damage(12);
+        const dx2 = plr.cx - sp.cx, dy2 = plr.cy - sp.cy;
+        const len = Math.hypot(dx2, dy2) || 1;
+        // stampede hits much harder
+        const power = spider.aiState === "stampede" ? 2 : 1;
+        plr.xv += dx2 / len * 4 * power;
+        plr.yv += 2.5 * power;
+        Player.damage(spider.aiState === "stampede" ? 20 : 12);
         spider.contactCd = 60;
+        // a hit interrupts a stampede
+        if (spider.aiState === "stampede") spider.aiTimer = 0;
     }
 
-    //more often web throws when close
+    // web throw on cooldown, more often when close
     spider.webCd = Math.max(0, (spider.webCd ?? 90) - 1);
-    const dist = Math.hypot(plr.cx - sp.cx, plr.cy - sp.cy);
-    if (spider.webCd <= 0 && dist < 500) {
+    if (spider.webCd <= 0 && seen && dist < 500 && spider.aiState !== "leap") {
         const web = new ProjectileAttack(spider, "web");
         //ballistic equations so cool
         const T = 40;
-        const vx = (plr.cx - sp.cx) / T;
-        const vy = (plr.cy - sp.cy) / T + 0.05 * T / 2;// counteract gravity!
+        const vx = dx / T;
+        const vy = dy / T + 0.05 * T / 2;// counteract gravity!
         web.fire(sp.cx, sp.cy + sp.h * 0.5, vx, vy);
         enemyProjectiles.push(web);
         spider.webCd = dist < 200 ? 90 : 180;
@@ -4240,25 +4356,16 @@ class WorldItem {
             this.xv*=0.7;
         }
         this.life--;
-
-        // pickup
-        const plr=Player.entity.hitbox;
-        if(
-            this.x>=plr.x&&this.x<=plr.x+plr.w&&
-            this.y>=plr.y&&this.y<=plr.y+plr.h
-        ){
-            if(this.item.pickup()) this.life=0;
-            // if inventory full, stay on the ground
-        }
-
         //render
         const bob=Math.sin(this.t*0.08)*3;
         const c=Item.colors?.[this.item.name]??[3.5,3.0,1.2];
-        glparticles.add(this.x,this.y+bob+8,1.002,c[0],c[1],c[2],0.95);
+        glparticles.add(this.x,this.y+bob+8,1.002,4*c[0],4*c[1],4*c[2],1);
     }
 }
 Item.colors={
     coin:[3.5,2.8,0.9],
+    gold:[3.5,2.8,0.9],
+    mysteriousKey:[2.6,2.2,3.6],
     healthPotion:[3.5,0.8,0.8],
     webVial:[2.2,3.5,2.4],
 };
@@ -4266,12 +4373,29 @@ Item.colors={
 class Coin extends Item{
     constructor(){super("coin",1);}
 }
+//Gold pile 
+class GoldPile extends Item{
+    constructor(amount=(200+Math.floor(Math.random()*101))){
+        super("gold",amount);
+        this.amount=amount;
+    }
+    pickup(){
+        Player.gold=(Player.gold??0)+this.amount;
+        return true; // consumed, no slot used
+    }
+}
+//Mysterious key, a quest item
+
+class MysteriousKey extends Item{
+    constructor(){super("mysteriousKey",1);}
+}
+//will replace later once I remember what I was thinking
 class HealthPotion extends Item{
     constructor(){super("healthPotion",1);}
     pickup(inv=Player.inventory){
-        // consume immediately: heal and never occupy a slot
+      
         Player.entity.health=Math.min(Player.entity.maxHealth,(Player.entity.health??100)+30);
-        gameUI.playerHit(); // reuse the flash, but make it green
+        gameUI.playerHit(); // reuse the flash but green
         return true;
     }
 }
@@ -4280,6 +4404,8 @@ class WebVial extends Item{
 }
 Item.registry={
     coin:Coin,
+    gold:GoldPile,
+    mysteriousKey:MysteriousKey,
     healthPotion:HealthPotion,
     webVial:WebVial,
 };
@@ -4345,6 +4471,8 @@ class Level {
         this.ground = this.slices.find((s) => s.z == 1);
         this.zones=zones;
         this.colliders=this.ground.colliders;
+        // per room interactables
+        this.interactables=zones.interactables??[];
     }
     get(x, y, z) {
         return this.slices[z].data[y][x];
@@ -4365,7 +4493,7 @@ class Level {
         const tile = s.data[s.data.length - ty - 1][tx];
         return this.colliders[tile] ?? null;
     }
-    rectCollision(box) {
+    rectCollision(box, source = null) {
         const s = this.ground;
         const tile = Level.tileSize * 0.5;
 
@@ -4384,7 +4512,10 @@ class Level {
                 const tileId = s.data[s.data.length - ty - 1][tx];
                 const collider = this.colliders[tileId];
 
-                this.tileset.get(tileId)?.onHit?.(tileId);
+                // tile hit events only fire for the player
+                if (source === Player.entity) {
+                    this.tileset.get(tileId)?.onHit?.(tileId);
+                }
                 if (collider) {
                     return collider;
                 }
@@ -4510,8 +4641,303 @@ worldMesh.setAttribute("uv", meshData.uv);
     if (this.fluidSim) {
         this.fluidSim = new FluidSim(gfx, lev);
     }
+// activate/restore the enemies that belong to this room
+EnemySpawn.activateForLevel(lev);
+}
+}
+
+/*
+{
+        level:"bank",               // which room it belongs to
+        cls:ArachnidBoss,         // constructor
+        x:318, y:64, z:1.0018,       // spawn position (hitbox px)
+        name:"spider",            // atlas name
+        respawn:"room"          // "room"  = back when you re-enter the room
+              // "never" = stays dead once killed
+           // N (sec) = respawns N seconds after dying
+        ai:"arachnid"   // which update hook runs each frame
+}
+*/
+class EnemySpawn {
+static spawns = [];      // spawn definitions
+static live = new Map(); // spawnDef: entity currently in the world
+static corpses = new Map(); // spawnDef: while dying
+static respawnTimers = new Map(); // spawnDef: frames until respawn
+static updaters = {
+        arachnid: arachnidAI,
+};
+
+static define(...entries) {
+        this.spawns.push(...entries.map(e => ({ respawn: "room", ...e })));
+}
+
+static get entity() {
+        return entityHandler;
+}
+
+static activateForLevel(level) {
+        // clean out anything still living from a previous room
+        for (const [def, ent] of [...this.live]) {
+        if (def.level !== level.name) {
+            if (!ent.dying) {
+                const idx = entityHandler.entities.indexOf(ent);
+                if (idx !== -1) entityHandler.entities.splice(idx, 1);
+            }
+            this.live.delete(def);
+        }
+        }
+
+        for (const def of this.spawns) {
+        if (def.level !== level.name) continue;
+
+        if (this.live.has(def)) continue; // already in this room
+
+        if (def.respawn === "never" && def.deadForever) continue;
+
+        if (def.respawn !== "room" && typeof def.respawn === "number") {
+            // timed respawn still counting down
+            if ((this.respawnTimers.get(def) ?? 0) > 0) continue;
+        }
+
+        this.spawn(def);
+        }
+}
+
+static spawn(def) {
+        const ent = entityHandler.add(new def.cls(def.x, def.y, def.z, def.name));
+        def.spawnRef = ent;
+        this.live.set(def, ent);
+        return ent;
+}
+
+// running ai and despawn
+static update() {
+        // respawn countdown for timed spawns
+        for (const [def, t] of this.respawnTimers) {
+        if (t > 0) {
+            this.respawnTimers.set(def, t - 1);
+            if (t - 1 <= 0) {
+                this.respawnTimers.delete(def);
+                def.deadForever = false;
+                // respawn immediately if near
+                if (def.level === world.level.name) this.spawn(def);
+            }
+        }
+        }
+
+        for (const [def, ent] of [...this.live]) {
+        // died
+        if (ent.dying) {
+            //kill cinematic effects muahahaha
+            if (def.impact) {
+                ImpactEffect.trigger();
+            }
+            if (def.respawn === "never") def.deadForever = true;
+            if (typeof def.respawn === "number") {
+                this.respawnTimers.set(def, def.respawn * 60);
+            }
+            this.live.delete(def);
+            // entity removes itself from entityHandler
+            continue;
+        }
+        // run this enemys AI updater
+        if (def.ai && (ent.health ?? 100) > 0) {
+            this.updaters[def.ai]?.(ent);
+        }
+        }
 }
 } 
+
+
+class ImpactEffect {
+    static frame = 0;    
+    static slowTimer = 0; 
+    static duration = 10;  //slo mo effect length
+
+    static trigger() {
+        this.frame = -1.5;
+        this.slowTimer = this.duration;
+    }
+  
+    static update() { 
+        gl.useProgram(compPass.program.program);
+        if (this.frame < 1) {
+            this.frame =  this.frame + 1 / 9;
+            gl.uniform1f(compPass.program.uniform("impactFrame"), Math.max(0.5,this.frame));
+        }else{
+            gl.uniform1f(compPass.program.uniform("impactFrame"), 0);
+             
+        }
+        
+        if(this.frame>0){
+            if (this.slowTimer > 0) this.slowTimer--;
+        }
+        
+    }
+
+    static get scale() {
+
+        const t = 1 - this.slowTimer / this.duration;   // 0 -> 1 as it recovers
+        return Math.max(0.2, Math.min(t,1));
+    } 
+} 
+
+/*
+Interaction:
+
+Pickups:  WorldItems descriptions and interactions.
+
+Interactables: declared per level in zones.interactables
+
+The active prompts are drawn by GameUI
+*/
+class Interaction {
+    static prompt = null;// {wx, wy, label}
+    static dialog = null; // {lines, timer}
+    static dialogFade = 0;
+
+    static update() {
+        if (Player.dead || !Player.entity?.hitbox) {
+            this.prompt = null;
+            return;
+        }
+        const plr = Player.entity.hitbox;
+
+        //interactable collisions
+        let zone = null;
+        for (const z of world.level.interactables) {
+            if (z.once && z.fired) continue;
+            if (
+                plr.x + plr.w / 2 >= z.x && plr.x + plr.w / 2 <= z.x + z.w &&
+                plr.y >= z.y && plr.y <= z.y + z.h
+            ) {
+                zone = z;
+                break;
+            }
+        }
+
+        // nearest overlapping ground item
+        let nearestItem = null;
+        let nearestDist = Infinity;
+        for (const wi of worldItems) {
+            const dx = wi.x - plr.cx;
+            const dy = wi.y - plr.cy;
+            const d = dx * dx + dy * dy;
+            const overlap =
+                wi.x >= plr.x - 10 && wi.x <= plr.x + plr.w + 10 &&
+                wi.y >= plr.y - 10 && wi.y <= plr.y + plr.h + 10;
+            if (overlap && d < nearestDist) {
+                nearestDist = d;
+                nearestItem = wi;
+            }
+        }
+
+        // dialog freezes the prompt while it is up
+        if (this.dialog) {
+            this.dialog.timer -= 1 / 60;
+            this.dialogFade = Math.min(1, this.dialogFade + 0.08);
+            if (this.dialog.timer <= 0) {
+                this.dialog = null;
+            }
+            this.prompt = null;
+            if (input.keyPress["e"]) this.dialog = null; // E also dismisses
+            return;
+        }
+        this.dialogFade = Math.max(0, this.dialogFade - 0.08);
+
+        if (zone) {
+            const label = zone.text ?? "Interact";
+            this.prompt = {
+                wx: zone.x + zone.w / 2,
+                wy: zone.y + zone.h,
+                label: `[E] ${label}`,
+            };
+            if (input.keyPress["e"]) {
+                zone.onUse?.();
+                if (zone.once) zone.fired = true;
+                if (zone.lines) {
+                    this.showDialog(zone.lines);
+                }
+            }
+        } else if (nearestItem) {
+            const names = {
+                gold: "gold",
+                mysteriousKey: "mysterious key",
+                coin: "coin",
+                webVial: "web vial",
+                healthPotion: "health potion",
+            };
+            this.prompt = {
+                wx: nearestItem.x,
+                wy: nearestItem.y + 14,
+                label: `[E] Pick up ${names[nearestItem.item.name] ?? nearestItem.item.name}`,
+            };
+            if (input.keyPress["e"]) {
+                if (nearestItem.item.pickup()) nearestItem.life = 0;
+            }
+        } else {
+            this.prompt = null;
+        }
+    }
+
+    static showDialog(lines) {
+        this.dialog = {
+            lines: Array.isArray(lines) ? lines : [lines],
+            timer: 2.2 + (Array.isArray(lines) ? lines.join(" ").length : lines.length) * 0.03,
+        };
+    }
+
+    // called from GameUI.draw
+    static draw(camera, ctx) {
+        
+        if (this.dialogFade > 0) {
+            const alpha = this.dialogFade;
+            const boxW = 420, boxH = 92;
+            const bx = (BASE_W - boxW) / 2;
+            const by = BASE_H - boxH - 34;
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = "rgba(8,8,14,0.88)";
+            ctx.beginPath();
+            ctx.roundRect(bx, by, boxW, boxH, 10);
+            ctx.fill();
+            ctx.strokeStyle = "#b8a0ff";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.fillStyle = "#FFEEBB";
+            ctx.font = "20px \"IM Fell DW Pica\"";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "top";
+            this.dialog?.lines.forEach((line, i) => {
+                ctx.fillText(line, bx + 22, by + 16 + i * 28);
+            });
+            ctx.restore();
+        }
+
+        if (!this.prompt) return;
+
+        // world to screen, reused from entity health bars
+        const sx = (this.prompt.wx - camera.x) * 2 + 320;
+        const sy = 180 - (this.prompt.wy - camera.y) * 2;
+
+        ctx.save();
+        ctx.font = "16px \"IM Fell DW Pica\"";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        const tw = ctx.measureText(this.prompt.label).width + 24;
+        const bob = Math.sin(frameCount * 0.1) * 2;
+        ctx.fillStyle = "rgba(8,8,14,0.82)";
+        ctx.beginPath();
+        ctx.roundRect(sx - tw / 2, sy - 26 + bob, tw, 24, 6);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(184,160,255,0.8)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillStyle = "#FFEEBB";
+        ctx.fillText(this.prompt.label, sx, sy - 6 + bob);
+        ctx.restore();
+    }
+}
 
 class Camera {
     constructor(target = null) {
@@ -4802,9 +5228,9 @@ const levelData = [{
         data: [
             "hi0 ghhhhhhhhhhhhhhhhhhhhhhhhhhhhhha",
             "b         faab                     f",
-            "b         ghhi                     g",
-            "b                                   ",
-            "addd                                ",
+            "b         ghhi                     f",
+            "b                                  f",
+            "addd                               f",
             "aaaaddddddddddadddaadddaadddddadaadd",
         ],
         colliders: {
@@ -4952,9 +5378,18 @@ const levelData2 = [
         ],
     },
 ];
-let level = new Level("room_1", levelData,tiles1, {
+const level = new Level("room_1", levelData,tiles1, {
     lights: new Float32Array([527, 147, 1.25, 526 + 256, 147, 0.75, 526 + 512, 147, 1.25]),
-    vias:{"0":{destination:"bank",off:{x:-64,y:65}}}
+    vias:{"0":{destination:"bank",off:{x:-64,y:65}}},
+    // example interactables
+    interactables: [
+        {
+            x: 20, y: 32, w: 96, h: 128,
+            text: "Read sign",
+            lines: ["Deposits are stored in the back room.", "Watch out for... noises."],
+            once: false,
+        },
+    ],
 });
 const level2 = new Level("bank", levelData2,tiles2, {
     lights: new Float32Array([130, 147, 0.95, 130 + 158, 147, 0.95, 130+158*2, 147, 0.95, 130+158*3, 147, 0.95]),
@@ -4965,9 +5400,19 @@ const level2 = new Level("bank", levelData2,tiles2, {
 
 let entityHandler = new EntityHandler();
 entityHandler.add(new Humanoid(256, 32, 1.001, "player"));
-for (var i = 0; i < 1; i++) {
-    entityHandler.add(new ArachnidBoss(318, 64, 1.0018, "spider"));
-}
+
+// enemy placement
+EnemySpawn.define(
+    {
+        level: "room_1",
+        cls: ArachnidBoss,
+        x: 718, y: 64, z: 1.0018,
+        name: "spider",
+        respawn: "never", 
+        ai: "arachnid",
+        impact: true,      // killcam!!!
+    },
+); 
 
 let Player = {};
 Player.entity = entityHandler.entities[0];
@@ -4992,11 +5437,11 @@ Player.entity.iframes = 0;
 Player.damage=function(amount){
     const p = Player.entity;
     if (Player.dead || p.dying) return;
-    // i- frames so one contact doesn't drain the whole bar
+    // i frames
     if (p.iframes > 0) return;
     p.iframes = 45;
     p.health = (p.health ?? 100) - amount;
-    // knockback away from the damage source direction is applied by caller
+    // knockback away from the damage source
     gameUI.playerHit();
     if (p.health <= 0) {
         Player.dead = true;
@@ -5030,7 +5475,6 @@ Player.sword = new Weapon(Player.entity, 6, 4, 0, 1, 32, 64, "rustySword");
 entityHandler.add(Player.sword);
 
 const levelsCondensed = [level,level2].reduce((accumulator, currentObject) => {
-  // Use the name property as the key, and set its value to the current object
   accumulator[currentObject.name] = currentObject;
   return accumulator;
 }, {});
@@ -5108,6 +5552,7 @@ const uiShortcuts = {
         });
 
         ui.bindShortcut("i", () => {
+            refreshInventoryScreen();
             ui.pushScreen(inventoryScreen);
             this.bindInventoryScreen();
         });
@@ -5126,6 +5571,7 @@ const uiShortcuts = {
         });
 
         ui.bindShortcut("i", () => {
+            refreshInventoryScreen();
             ui.pushScreen(inventoryScreen);
             this.bindInventoryScreen();
         });
@@ -5235,6 +5681,7 @@ gameScreen.addUpdater((input, ui, screen) => {
         gl.useProgram(mainProgram.program);
         gl.uniform3fv(camMat, [camera.x, camera.y, camera.z]);
         lightUniformData.fill(0);
+        
         lightUniformData.set(world.level.zones.lights.subarray(0, lightUniformData.length));
 
         gl.uniform3fv(glLights, lightUniformData);
@@ -5243,7 +5690,7 @@ gameScreen.addUpdater((input, ui, screen) => {
         //fluid stuff (purely visual air currents; skipped when particles are off)
         if (graphicsSettings.particles) {
             windUniformData.fill(0);
-            // WIND EMITTERS DISABLED FOR NOW
+            // WIND EMITTERS DISABLED FOR NOW cause I have yet to add anything big enough for that.
             // zones.wind entries: [x, y, vx, vy] in level pixels (y up).
             // const winds = world.level.zones.wind;
             // if (winds) {
@@ -5270,12 +5717,13 @@ gameScreen.addUpdater((input, ui, screen) => {
         }
 
         //run enemy AI
-        if (entityHandler.entities[1] instanceof ArachnidBoss) {
-            arachnidAI(entityHandler.entities[1]);
-        }
+        EnemySpawn.update();
+
+        //world interaction
+        Interaction.update();
         Player.update();
 
-        // player i-frames
+        // player i frames
         if (Player.entity.iframes > 0) Player.entity.iframes--;
         //console.log(input.ls)
         glparticles.clear();
@@ -5376,9 +5824,10 @@ gameScreen.addUpdater((input, ui, screen) => {
 
         gctx.drawImage(gfx.canvas, 0, 0, 640, 360);
 
-        //game HUD (health bars etc.) drawn on top of the frame
+        //game HUD
         gameUI.update();
         gameUI.draw(camera);
+        Interaction.draw(camera, gctx);
 
         //transition overlays on top of everything
         roomFader.update();
@@ -5447,7 +5896,7 @@ function addToggle(menu, label, property) {
   
 const graphicsSettings = {
     showFPS: true,
-    bloom: !true,
+    bloom: true,
     particles: true, 
     windParticles: true
 };
@@ -5488,6 +5937,57 @@ const settingsScreen = makeMenu(
     })
 );
 
+
+const inventoryScreen = makeMenu("Inventory", makeButton("Back", () => {
+    ui.popScreen();
+    if(ui.screenStack[ui.screenStack.length-1]==gameScreen){
+        uiShortcuts.bindGameScreen();
+    }
+}));
+
+function refreshInventoryScreen() {
+    // remove old rows but keep the structure of the menu
+    const keep = 3; // title, spacer, back button
+    while (inventoryScreen.children.length > keep) {
+        inventoryScreen.remove(inventoryScreen.children[keep]);
+    }
+
+    const inv = Player.inventory;
+    inventoryScreen.add(new UILabel({
+        text: `Gold: ${Player.gold ?? 0}`,
+        font: "body",
+        textAlign: "left",
+        style: { color: "#FFD966" }
+    }));
+
+    const filled = inv.items.filter(Boolean);
+    if (filled.length === 0) {
+        inventoryScreen.add(new UILabel({
+            text: "(empty pockets)",
+            font: "small",
+            textAlign: "left",
+            style: { color: "muted" }
+        }));
+    } else {
+        for (const item of filled) {
+            // gold piles are shown also
+            const label = item.amount ? `${item.name} x${item.amount}` : item.name;
+            inventoryScreen.add(new UILabel({
+                text: `- ${label}`,
+                font: "body",
+                textAlign: "left"
+            }));
+        }
+    }
+
+    inventoryScreen.add(new UILabel({
+        text: `Slots: ${filled.length}/${inv.items.length}`,
+        font: "small",
+        textAlign: "left",
+        style: { color: "muted" }
+    }));
+}
+
 //respawn at the OG spawn point for now
 const deathScreen = makeMenu(
     "You Died",
@@ -5506,8 +6006,41 @@ const deathScreen = makeMenu(
 ui.setScreen(root);
 ui.render();
 audioManager.play("menu"); //start music
+/*
+//capture toggle: number keys 1 starts recording, 0 stops and saves
 
-
+const REC_FRAMERATE = 60;
+let capturer = null;
+window.addEventListener("keydown", (e) => {
+    if (e.key === "1" && !capturer) {
+        capturer = new CCapture({
+            format: "webm",
+            framerate: REC_FRAMERATE,
+        });
+        
+        const realRAF = window.requestAnimationFrame.bind(window);
+        const realTimeout = window.setTimeout.bind(window);
+        const realDateNow = Date.now.bind(Date);
+        const realNow = performance.now.bind(performance);
+        capturer.start();
+        window.requestAnimationFrame = realRAF;
+        window.setTimeout = realTimeout;
+        Date.now = realDateNow;
+        performance.now = realNow;
+        console.log("[rec] started - press 0 to save");
+    } else if (e.key === "0" && capturer) {
+        capturer.stop();
+        capturer.save((blob) => {
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = "honestBanker.webm";
+            a.click();
+        });
+        capturer = null;
+        console.log("[rec] saved");
+    }
+});
+ */
 var frameCount = 0;
 var now;
 const frameTime = 1000 / 60;
@@ -5515,14 +6048,15 @@ const frameTime = 1000 / 60;
 let nextFrame = performance.now();
 
 let then = performance.now();
-
 function draw(now) {
+    // slow motion
+    const stepGate = frameTime / Math.max(0.1, ImpactEffect.scale);
     if (now >= nextFrame) {
         let dt = now - then;
         then = now;
 
 
-        nextFrame += frameTime;
+        nextFrame += stepGate;
         input.updatePre();
         ui.update(input);
       
@@ -5541,7 +6075,9 @@ function draw(now) {
         ctx.fillText(Math.ceil(1000 / dt), 10, 10);
        
         input.updatePost()
+        if (capturer) capturer.capture(c);
         frameCount++;
+        ImpactEffect.update();
         if (now > nextFrame + frameTime) {
             nextFrame = now + frameTime;
         }

@@ -36,38 +36,10 @@ https://www.khanacademy.org/computer-programming/spin-off-of-quality-adjust/5413
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Grape+Nuts&family=Gravitas+One&family=IM+Fell+DW+Pica:ital@0;1&display=swap" rel="stylesheet">
-<script id="script1" src="https://cdn.jsdelivr.net/gh/Bearkirb/honestBankerScriptRepo@27a78d1f974fed3fdd9084298d100f8cd1909525/testTilemaps.js"></script>
-<script id="script2" src="https://cdn.jsdelivr.net/gh/Bearkirb/honestBankerScriptRepo@560a10e1be8b05d307a7c67f649ffeae4ca85d42/UIAssets.js"></script>
+<script id="script1" src="https://cdn.jsdelivr.net/gh/Bearkirb/honestBankerScriptRepo@7b674f7fbdcab7147eb655be439c3119f745d3c6/testTilemaps.js"></script>
+<script id="script2" src="https://cdn.jsdelivr.net/gh/Bearkirb/honestBankerScriptRepo@7b674f7fbdcab7147eb655be439c3119f745d3c6/UIAssets.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/ccapture.js@1.1.0/build/CCapture.all.min.js"></script>
 
-<script>
-async function loadScripts(){
-
-    const dev =
-        location.hostname === "localhost" ||
-        location.hostname === "127.0.0.1";
-
-    const base = dev
-        ? "./"
-        : "https://cdn.jsdelivr.net/gh/USER/REPO@COMMIT/js/";
-    const scripts = [
-        "UIAssets.js",
-        "testTilemaps.js",
-    ];
-
-    for (const file of scripts) {
-        const script = document.createElement("script");
-        script.src = base + file;
-
-        await new Promise((resolve, reject) => {
-            script.onload = resolve;
-            script.onerror = () =>
-                reject(new Error(`Failed to load ${file}`));
-
-            document.head.appendChild(script);
-        });
-    }
-}
-</script>
 
 <script id='vertex-shader' type='glsl'>#version 300 es
 layout(location=0) in vec3 coordinates;
@@ -121,7 +93,7 @@ fragColor=icol;
 vec3 norm=normalize(texelFetch(iChannel1,ivec2(uvi.xy),0).rgb-vec3(0.5,0.5,0.0));
 norm.z=(norm.z*norm.z);
 
-norm*=vec3(0.8,0.8,1);
+norm*=vec3(0.8,0.8,1); 
 norm=normalize(norm);
 
 vec3 to=(pos+(camera-lightPos[0])/vec3(180.0,90,1));
@@ -323,7 +295,7 @@ const float scale=1.0;
  fragColor.g+=texelFetch(iChannel0,ivec2(fragCoord),0).g*0.45;
  fragColor.b+=texelFetch(iChannel0,ivec2(fragCoord+vec2(1.0,0.0)),0).b*0.40;
  vec3 bl=texelFetch(iChannel1,ivec2(fragCoord),0).rgb;
- fragColor.rgb+=pow(bl,vec3(2.0))*0.5;
+ fragColor.rgb+=pow(bl,vec3(1.5))*2.5;
 
 fragColor.rgb=ACES(fragColor.rgb*2.9)*1.1;
 
@@ -455,7 +427,7 @@ vec4 b = fetch(ivec2(back));
 
     //vorticity confinement
     vec2 force = vec2(0.0);
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         float mult = exp2(float(i));
         float oL = abs(curlAt(fc + vec2(-mult, 0.0), mult));
         float oR = abs(curlAt(fc + vec2( mult, 0.0), mult));
@@ -463,10 +435,10 @@ vec4 b = fetch(ivec2(back));
         float oT = abs(curlAt(fc + vec2(0.0, mult), mult));
         vec2 N = vec2(oR - oL, oT - oB) / (2.0 * mult);
         float nl = length(N);
-        vec2 nDir = N / (nl + 0.001);
+        vec2 nDir = N / (nl + 0.01);
         force += vec2(nDir.y, -nDir.x) * curlAt(fc, mult) / mult;
     }
-    nv += force * 0.05;
+    nv += force * 0.0015;
 
     //wind addition
     for (int i = 0; i < 8; i++) {
@@ -480,7 +452,7 @@ vec4 b = fetch(ivec2(back));
     //player stir addition
     {
         vec2 d = fc - stir.xy;
-        float infl = exp(-dot(d, d) / 8.0);
+        float infl = exp(-dot(d, d) / 1.0);
         nv = mix(nv, stir.zw, infl * 0.15);
         nw += (1.0 - nw) * infl * 0.03;
     }
@@ -495,7 +467,7 @@ vec4 b = fetch(ivec2(back));
 
 
     //velocity decay
-    nv *= 0.985;
+    nv *= 0.997;
 
     fragColor = vec4(nv, o.z, nw);
 }
@@ -605,7 +577,24 @@ out float vLife;
 float rnd(float seed){
     return fract(sin(seed * 12.9898) * 43758.5453);
 }
-
+vec4 lfetch(sampler2D tex, vec2 uv, int mipLevel) {
+    // Convert normalized UV coordinates to integer texel space
+    vec2 exactPixel = uv-vec2(0.5);
+    
+    ivec2 iCoord = ivec2(floor(exactPixel));
+    vec2 f = fract(exactPixel); // Fractional part for weighting
+    
+    // Fetch 4 neighboring texels
+    vec4 tl = texelFetch(tex, iCoord + ivec2(0, 0), mipLevel);
+    vec4 tr = texelFetch(tex, iCoord + ivec2(1, 0), mipLevel);
+    vec4 bl = texelFetch(tex, iCoord + ivec2(0, 1), mipLevel);
+    vec4 br = texelFetch(tex, iCoord + ivec2(1, 1), mipLevel);
+    
+    // Bilinear interpolation
+    vec4 topMix    = mix(tl, tr, f.x);
+    vec4 bottomMix = mix(bl, br, f.x);
+    return mix(topMix, bottomMix, f.y);
+}
 void main(){
     vec4 p = inData;
 
@@ -621,16 +610,17 @@ void main(){
     }
 
     // sample the fluid field
-    ivec2 tc = ivec2(p.xy / (levelSize / simSize));
-    vec4 fluid = texelFetch(iChannel0, clamp(tc, ivec2(0), ivec2(simSize) - 1), 0);
-
+    vec2 tc = vec2(p.xy / (levelSize / simSize));
+    vec4 fluid2 = lfetch(iChannel0, clamp(tc, vec2(0), vec2(simSize) - 1.0), 0);
+    vec4 fluid = texelFetch(iChannel0, clamp(ivec2(tc), ivec2(0),ivec2(simSize) - 1), 0);
+    
     // motes inside solid cells die instantly so they never draw there
     if (fluid.w < 0.0) {
         p.w = 0.0;
     }
 
     // solid cells have no wind
-    vec2 vel = fluid.w >= 0.0 ? fluid.xy : vec2(0.0);
+    vec2 vel = fluid.w >= 0.0 ? fluid2.xy : vec2(0.0);
 
     p.xy += vel * dt * 1.2;
     p.w -= dt * 0.006;   // slowly burn out then respawn
