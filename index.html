@@ -36,10 +36,35 @@ https://www.khanacademy.org/computer-programming/spin-off-of-quality-adjust/5413
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Grape+Nuts&family=Gravitas+One&family=IM+Fell+DW+Pica:ital@0;1&display=swap" rel="stylesheet">
-<script id="script1" src="https://cdn.jsdelivr.net/gh/Bearkirb/honestBankerScriptRepo@7b674f7fbdcab7147eb655be439c3119f745d3c6/testTilemaps.js"></script>
-<script id="script2" src="https://cdn.jsdelivr.net/gh/Bearkirb/honestBankerScriptRepo@7b674f7fbdcab7147eb655be439c3119f745d3c6/UIAssets.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/ccapture.js@1.1.0/build/CCapture.all.min.js"></script>
 
+<!--<script src="https://cdn.jsdelivr.net/npm/ccapture.js@1.1.0/build/CCapture.all.min.js"></script>-->
+<script>
+async function loadScripts(){
+
+    const dev = false;
+
+    const base = dev
+        ? "./"
+        : "https://cdn.jsdelivr.net/gh/Bearkirb/honestBankerScriptRepo@7b674f7fbdcab7147eb655be439c3119f745d3c6/";
+    const scripts = [
+        "UIAssets.js",
+        "testTilemaps.js",
+    ];
+
+    for (const file of scripts) {
+        const script = document.createElement("script");
+        script.src = base + file;
+
+        await new Promise((resolve, reject) => {
+            script.onload = resolve;
+            script.onerror = () =>
+                reject(new Error(`Failed to load ${file}`));
+
+            document.head.appendChild(script);
+        });
+    }
+}
+</script>
 
 <script id='vertex-shader' type='glsl'>#version 300 es
 layout(location=0) in vec3 coordinates;
