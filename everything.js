@@ -113,6 +113,8 @@ window.addEventListener("mouseup", event => {
             event.preventDefault();
             this.keys[event.key.toLowerCase()] = true;
             this.keyPress[event.key.toLowerCase()] = true;
+            //get audio as soon as interaction
+            SpatialAudio.resume();
         });
 
         window.addEventListener("keyup", event => {
@@ -155,17 +157,19 @@ window.addEventListener("mouseup", event => {
             this.smoothSticks();
 
         }
+        //inputs relative to which way the player is facing
+        const fwd = Player?.entity?.facing ?? 1;
         if(this.up(this.rs)&&!this.pup){
             this.mrc.push("N");
         }
         if(this.right(this.rs)&&!this.pright){
-            this.mrc.push("E");
+            this.mrc.push(fwd < 0 ? "W" : "E");
         }
         if(this.down(this.rs)&&!this.pdown){
             this.mrc.push("S");
         }
         if(this.left(this.rs)&&!this.pleft){
-            this.mrc.push("W");
+            this.mrc.push(fwd < 0 ? "E" : "W");
         }
         
     }
@@ -856,6 +860,192 @@ class AudioTrack {
         this.el.addEventListener("error", () => { console.warn("audio missing:", url); });
     }
 }
+
+/*
+SpatialAudio!
+
+A WebAudio graph can attatch to any sound effect or song
+
+  source,lowpassL lowpassR, reverb convolver, wetLR, destination
+
+structure for future sound effects:
+
+  const sfx = SpatialAudio.addSource(new Audio("sounds/whatever.mp3"), {loop:false});
+  sfx.play();     
+  SpatialAudio.update();   //already in game loop
+*/
+class SpatialAudio {
+    static ctx = null;
+    static dryGain = null;
+    static wetGain = null;
+    static lowpassL = null;
+    static lowpassR = null;
+    static convolver = null;
+    static splitter = null;
+    static merger = null;
+    static sources = [];
+    static enabled = false;
+
+    // impulse response for the convolver
+    static makeImpulse(seconds = 2.2, decay = 2.0) {
+        const rate = this.ctx.sampleRate;
+        const len = Math.floor(rate * seconds);
+        const buf = this.ctx.createBuffer(2, len, rate);
+        for (let ch = 0; ch < 2; ch++) {
+            const d = buf.getChannelData(ch);
+            for (let i = 0; i < len; i++) {
+                d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+            }
+        }
+        return buf;
+    }
+
+    //lazy build on first user gesture
+    static init() {
+        if (this.ctx) return;
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        this.ctx = new AC();
+
+        //everything plugs into input
+        this.input = this.ctx.createGain();
+
+        //dry path
+        this.dryGain = this.ctx.createGain();
+        this.input.connect(this.dryGain);
+        this.dryGain.connect(this.ctx.destination);
+
+        // wet path: stereo lowpass and reverb
+        this.lowpassL = this.ctx.createBiquadFilter();
+        this.lowpassR = this.ctx.createBiquadFilter();
+        this.lowpassL.type = this.lowpassR.type = "lowpass";
+        this.lowpassL.frequency.value = this.lowpassR.frequency.value = 20000;
+        this.convolver = this.ctx.createConvolver();
+        this.convolver.buffer = this.makeImpulse();
+        // the reverb is naturally quiet from the IR
+        this.reverbBoost = this.ctx.createGain();
+        this.reverbBoost.gain.value = 2.5;
+        this.wetGain = this.ctx.createGain();
+        this.wetGain.gain.value = 0.25;
+
+        this.splitter = this.ctx.createChannelSplitter(2);
+        this.merger = this.ctx.createChannelMerger(2);
+        this.input.connect(this.lowpassL);
+        this.input.connect(this.lowpassR);
+        this.lowpassL.connect(this.splitter, 0, 0); //hmm auto connect takes input idx and output idx
+        this.lowpassL.connect(this.convolver);
+        this.lowpassR.connect(this.convolver);
+        this.convolver.connect(this.reverbBoost);
+        this.reverbBoost.connect(this.wetGain);
+        this.wetGain.connect(this.ctx.destination);
+
+        this.enabled = true;
+    }
+
+    //resume AudioContext after user interaction
+    static resume() {
+        this.init();
+        if (this.ctx?.state === "suspended") this.ctx.resume();
+    }
+
+    //add a media element
+
+    static attach(el) {
+        this.init();
+        if (!this.ctx) return null;
+        // attaching twice throws, so mark it
+        if (el._spatialAttached) return el;
+        const src = this.ctx.createMediaElementSource(el);
+        src.connect(this.input);
+        el._spatialAttached = true;
+        this.sources.push(el);
+        return el;
+    }
+
+    /*
+    Probe the room around the player with raycasts and set muffling + reverb
+    */
+    static updateRoom(level, playerBox) {
+        if (!this.enabled) return;
+        const cx = playerBox.cx, cy = playerBox.cy;
+
+        /*
+        Probes are sent out from 0 to pi, don't want to get the floor because it 
+        makes the effect change a lot when you jump.
+        */
+        const RAYS = 12;
+        let sum = 0;
+        let minD = Infinity;
+        let distE = Infinity, distW = Infinity;
+        for (let i = 0; i < RAYS; i++) {
+            const a = (i / RAYS) * Math.PI;
+            const dx = Math.cos(a), dy = Math.sin(a);
+            const hit = level.raycast(cx, cy, dx, dy);
+            const d = hit?.distance ?? 2000;
+            sum += d;
+            if (d < minD) minD = d;
+            if (dx > 0.5) distE = Math.min(distE, d);  // rightward rays
+            if (dx < -0.5) distW = Math.min(distW, d); // leftward rays
+        }
+        const avg = sum / RAYS;
+
+        // menu screens get a dry clean mix
+        if (ui.activeScreen !== gameScreen) {
+            const now = this.ctx.currentTime;
+            this.wetGain.gain.setTargetAtTime(0, now, 0.3);
+            this.dryGain.gain.setTargetAtTime(1, now, 0.3);
+            this.lowpassL.frequency.setTargetAtTime(20000, now, 0.3);
+            this.lowpassR.frequency.setTargetAtTime(20000, now, 0.3);
+            return;
+        }
+
+
+        // openness from average distance
+        const open = Math.max(0, Math.min(1, avg / 1690));
+
+        // wet/dry mix targets
+        const wetT = 0.01 + open * 0.59;          // 0.10 .. 0.50
+        const dryT = 1 - wetT * 0.6;
+
+        // muffling
+        const closeness = Math.max(0, Math.min(1, 1 - Math.min(distE,distW) / 260));
+        const cutoffT = 300 + (1-closeness) * 5700; // 300Hz .. 6kHz
+
+        // a wall muffles more
+        const cutoffET = distE < 90 ? cutoffT * 0.4 : cutoffT;
+        const cutoffWT = distW < 90 ? cutoffT * 0.4 : cutoffT;
+
+        //Temporal smoothing
+        this.smoothWet ??= wetT;
+        this.smoothDry ??= dryT;
+        this.smoothCutoffE ??= cutoffET;
+        this.smoothCutoffW ??= cutoffWT;
+        const k = 0.5;
+        this.smoothWet += (wetT - this.smoothWet) * k;
+        this.smoothDry += (dryT - this.smoothDry) * k;
+        this.smoothCutoffE += (cutoffET - this.smoothCutoffE) * k;
+        this.smoothCutoffW += (cutoffWT - this.smoothCutoffW) * k;
+
+        const now = this.ctx.currentTime;
+        this.wetGain.gain.setTargetAtTime(this.smoothWet, now, 0.2);
+        this.dryGain.gain.setTargetAtTime(this.smoothDry, now, 0.2);
+        this.lowpassR.frequency.setTargetAtTime(Math.max(20, this.smoothCutoffE), now, 0.15);
+        this.lowpassL.frequency.setTargetAtTime(Math.max(20, this.smoothCutoffW), now, 0.15);
+    }
+
+    // convenience for future sound effects
+    static playSfx(url, { loop = false, volume = 1 } = {}) {
+        this.init();
+        if (!this.ctx) return null;
+        const el = new Audio(url);
+        el.loop = loop;
+        el.volume = volume;
+        this.attach(el);
+        el.play().catch(() => {});
+        return el;
+    }
+}
+
 class AudioManager {
     /*
     Room and menu music, one track per level name, crossfades between rooms
@@ -888,13 +1078,15 @@ class AudioManager {
             this.gap = this.gapTime;
             return;
         }
-        //this.startTrack(name);
+         this.startTrack(name);
     }
     startTrack(name) {
         const next = this.get(name);
         this.current = name;
         this.next = null;
         if (next && next.ready) {
+            // route through the spatial audio graph (reverb/muffling)
+            SpatialAudio.attach(next.el);
             next.el.volume = 0;
             next.el.play().catch(() => {});
             next.fading = 1;
@@ -933,6 +1125,7 @@ class AudioManager {
                     t.fading = 0;
                 }
             } else if (t.pending && t.ready) {
+                SpatialAudio.attach(t.el);
                 t.el.volume = 0;
                 t.el.play().catch(() => {});
                 t.fading = 1;
@@ -1099,16 +1292,21 @@ class UILabel extends UIElement {
     const p = this.getPadding();
     const b = this.bounds;
 
-    renderer.drawText(this.text, {
-        x: b.x + p.left,
-        y: b.y + p.top+1,
-        width: Math.max(0, b.width - p.left - p.right),
-        height: Math.max(0, b.height - p.top - p.bottom)
-    }, {
-        font: this.font,
-        textAlign: this.textAlign,
-        color: this.style.color ?? "text",
-        padding: this.style.textPadding ?? 0
+    // split on newlines
+    const lines = String(this.text ?? "").split("\n");
+    const lineH = b.height / Math.max(1, lines.length);
+    lines.forEach((line, i) => {
+        renderer.drawText(line.replace(/^\t/, "     "), {
+            x: b.x + p.left,
+            y: b.y + p.top + i * lineH + 1,
+            width: Math.max(0, b.width - p.left - p.right),
+            height: lineH
+        }, {
+            font: this.font,
+            textAlign: this.textAlign,
+            color: this.style.color ?? "text",
+            padding: this.style.textPadding ?? 0
+        });
     });
 }
     measureContent(available, context) {
@@ -1123,17 +1321,25 @@ ctx.font =
 //console.log(ctx.font,this.text)
 
     const text = String(this.text ?? "");
-    const metrics = ctx.measureText(text || "Mg");
+    // widest line wins; blank lines still take a line of height
+    const lines = text.split("\n");
+    let width = 0;
+    for (const line of lines) {
+        if (!line) continue;
+        width = Math.max(width, ctx.measureText(line.replace(/^\t/, "     ")).width);
+    }
+
+    const metrics = ctx.measureText(text.replace(/\n/g, "").replace(/^\t/, "") || "Mg");
 
     const fontSize =
         Number(this.font.match(/(\d+(?:\.\d+)?)px/)?.[1]) || 16;
 
-    const width = text ? metrics.width : 0; 
-    const height = Math.max(
+    const lineH = Math.max(
         metrics.actualBoundingBoxAscent +
             metrics.actualBoundingBoxDescent,
         fontSize * 1.2
     );
+    const height = lineH * lines.length;
 
 
     ctx.restore();
@@ -1721,6 +1927,10 @@ update(input) {
     
 
     render() {
+        // always clear, even with no active screen, so a bad stack state
+        // can never leave stale pixels under the fps readout
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
         const screen = this.activeScreen;
 
         if (!screen) return;
@@ -3234,8 +3444,8 @@ class Humanoid extends Entity {
  const aim = input.rs.x;
         const move = this.hitbox.xv;
 
-        const aimDeadzone = 7.5;
-        const moveDeadzone = 3.5;
+        const aimDeadzone = 0.8;
+        const moveDeadzone = 1.5;
 
         const aimActive = Math.abs(aim) > aimDeadzone;
         const moveActive = Math.abs(move) > moveDeadzone;
@@ -3246,10 +3456,34 @@ class Humanoid extends Entity {
             this.targetFacing = Math.sign(move);
         } 
 
+        // very strongly bias toward the closest enemy
+        const enemyBiasRange = 480;
+        let nearestEnemy = null;
+        let nearestEnemyDist = Infinity;
+        for (const ent of entityHandler.entities) {
+            if (ent === Player.entity || ent.dying || !ent.hitbox || ent instanceof Weapon) continue;
+            const d = Math.hypot(ent.hitbox.cx - this.hitbox.cx, ent.hitbox.cy - this.hitbox.cy);
+            if (d < nearestEnemyDist) {
+                nearestEnemyDist = d;
+                nearestEnemy = ent;
+            }
+        }
+        if (nearestEnemy && nearestEnemyDist < enemyBiasRange) {
+            const edir = Math.sign(nearestEnemy.hitbox.cx - this.hitbox.cx) || 1;
+            // when actively aiming the player keeps manual control, otherwise the nearest enemy wins
+            if (!aimActive || moveActive) {
+                this.targetFacing = edir;
+            }
+        }
+
         // turn speed
         const turnSpeed = aimActive ? 0.16 : 0.06;
+        // when locked onto an enemy, snap there faster
+        const turnSpeedFinal = nearestEnemy && nearestEnemyDist < enemyBiasRange && !aimActive
+            ? Math.max(turnSpeed, 0.22)
+            : turnSpeed;
 
-        this.facing += (this.targetFacing - this.facing) * turnSpeed;
+        this.facing += (this.targetFacing - this.facing) * turnSpeedFinal;
         this.facing = Math.max(-1, Math.min(1, this.facing));
 
 
@@ -3693,9 +3927,9 @@ class Weapon {
     }
 
     /*
-    Hit detection samples the blade's world-space vertices (plus midpoint)
-    against every other entity's hitbox. Damage/knockback only apply while
-    the attack is live with inputs.
+    Hit detection samples the blades world space vertices (plus midpoint)
+    against every other entitys hitbox. Damage/knockback only apply while
+    the attack is live
     */
     checkHits(damage, kbScale) {
         const v = this.vertices;
@@ -3997,13 +4231,16 @@ class PlayerAttack {
 
         if (pose) {
             this.phase += this.speed*(pose.mult*0.5+0.5);
-            this.hand.xv += (pose.x/100-this.player.hand.x)*0.1;
+            // mirror pose.x when facing left so the swing stays sword-side
+            const sideX = pose.x * Math.sign(this.player.facing || 1);
+            this.hand.xv += (sideX/100-this.player.hand.x)*0.1;
             this.hand.yv += (pose.y/100-this.player.hand.y)*0.1;
             this.hand.xv*=0.7;
             this.hand.yv*=0.7;
             this.player.hand.x+=this.hand.xv;
             this.player.hand.y+=this.hand.yv;
-            this.player.tilt += (pose.tilt-this.player.tilt)*0.14;
+            // tilt sign flips with facing
+            this.player.tilt += (pose.tilt*Math.sign(this.player.facing || 1)-this.player.tilt)*0.14;
 
             //check sword hits
             // fine for 60fps combat ig
@@ -4370,7 +4607,7 @@ Item.colors={
     healthPotion:[3.5,0.8,0.8],
     webVial:[2.2,3.5,2.4],
 };
-// concrete item types (registered so loot tables can reference them by name)
+// item types for loot tables
 class Coin extends Item{
     constructor(){super("coin",1);}
 }
@@ -4380,8 +4617,9 @@ class GoldPile extends Item{
         super("gold",amount);
         this.amount=amount;
     }
-    pickup(){
-        Player.gold=(Player.gold??0)+this.amount;
+        pickup(){
+        Player.goldMult ??= 1;
+        Player.gold=(Player.gold??0)+Math.round(this.amount*Player.goldMult);
         return true; // consumed, no slot used
     }
 }
@@ -4638,7 +4876,7 @@ worldMesh.setAttribute("uv", meshData.uv);
     let pair=this.roomAssets[lev.name] ?? [null,null];
     this.currentTilemap=pair[0];
     this.currentTilemapNormal=pair[1];
-    // rebuild the air-current sim for the new level size
+    // rebuild the air current sim for the new level size
     if (this.fluidSim) {
         this.fluidSim = new FluidSim(gfx, lev);
     }
@@ -4790,7 +5028,7 @@ Pickups:  WorldItems descriptions and interactions.
 
 Interactables: declared per level in zones.interactables
 
-The active prompts are drawn by GameUI
+active prompts are drawn by GameUI
 */
 class Interaction {
     static prompt = null;// {wx, wy, label}
@@ -5034,21 +5272,22 @@ const defaultUITheme = {
     colors: {
         background: "rgb(0,0,0)",
         panel: "rgb(30,40,50,0.6)",
+        paperPanel: "rgba(245,238,188,0.94)", // legal paper for diegetic menus mr devine would be proud
         border: "#606579",
-        text: "#FFEEBB",
+        text: "#1a1a18",         // near-black ink on the paper
         strokeStyle:"rgb(0,0,0)",
-        muted: "#aaaab7",
-        button: "#343747",
-        focus: "#b8a0ff",
-        buttonHover: "#484c61",
-        buttonPressed: "#252735"
+        muted: "#6a6455",              // faded pencil-gray, still readable
+        button: "rgba(0,0,0,0.02)",  // semi transparent
+        focus: "#3a2f10",         // dark ink focus, not gold
+        buttonHover: "rgba(0,0,0,0.08)",// faint ink smudge on hover
+        buttonPressed: "rgba(0,0,0,0.16)",
     },
 
     fonts: {
         title: '36px "Gravitas One"',
         body: '26px "IM Fell DW Pica"',
-        small: '12px "IM Fell DW Pica"',
-        strokeWidth:5,
+        small: '16px "Grape Nuts"',       // handwritten font nice
+        strokeWidth:0, // no outline 
     },
 
     borders: {
@@ -5056,6 +5295,78 @@ const defaultUITheme = {
         button: 1
     }
 };
+
+// dark theme for the non-diegetic menus: white text, black outline
+const gameUITheme = {
+    ...defaultUITheme,
+    colors: {
+        ...defaultUITheme.colors,
+        text: "#ffffff",
+        strokeStyle: "#000000",
+        muted: "#b0b4c0",
+        button: "#343747",
+        focus: "#b8a0ff",
+        buttonHover: "#484c61",
+        buttonPressed: "#252735",
+    },
+    fonts: {
+        ...defaultUITheme.fonts,
+        small: '12px "IM Fell DW Pica"',
+        strokeWidth: 4,   // 2px black outline
+    },
+};
+
+/*
+Legal-pad background
+*/
+function makeLegalPadCanvas(w = BASE_W, h = BASE_H) {
+    const pad = new OffscreenCanvas(w, h);
+    const p = pad.getContext("2d");
+
+    // yellow paper
+    p.fillStyle = "#f5eebc";
+    p.fillRect(0, 0, w, h);
+    for (let x = 0; x < w; x += 3) {
+        p.fillStyle = `rgba(180,160,90,${0.03 + Math.random() * 0.04})`;
+        p.fillRect(x, 0, 1, h);
+    }
+
+    // faint blue horizontal lines
+    p.strokeStyle = "rgba(90,120,180,0.28)";
+    p.lineWidth = 1;
+    for (let y = 26; y < h; y += 20) {
+        p.beginPath();
+        p.moveTo(0, y + Math.random() * 0.6);
+        p.lineTo(w, y + Math.random() * 0.6);
+        p.stroke();
+    }
+
+    // red margin line
+    p.strokeStyle = "rgba(200,80,0.45)";
+    p.lineWidth = 1.5;
+    for (const off of [54, 57]) {
+        p.beginPath();
+        p.moveTo(off, 0);
+        p.lineTo(off, h);
+        p.stroke();
+    }
+
+    // a few faint stains
+    for (let i = 0; i < 4; i++) {
+        const sx = Math.random() * w, sy = Math.random() * h;
+        const r = 8 + Math.random() * 22;
+        const g = p.createRadialGradient(sx, sy, r * 0.3, sx, sy, r);
+        g.addColorStop(0, "rgba(150,120,60,0.05)");
+        g.addColorStop(1, "rgba(150,120,60,0)");
+        p.fillStyle = g;
+        p.beginPath();
+        p.arc(sx, sy, r, 0, Math.PI * 2);
+        p.fill();
+    }
+
+    return pad;
+}
+const legalPadCanvas = makeLegalPadCanvas();
 
 
 /*
@@ -5176,6 +5487,7 @@ let glparticles = new GLParticles(gl);
 //Muahahahhahaa formatting.  Looks stupid but works cause js is built different.
 const tiles1 = new TileSet()
     .define("0", { x: -64, y: -64, w: 64, h: 64 })
+    .define("1", { x: -64, y: -64, w: 64, h: 64 })
     .define("a", { x: 64, y: 64, w: 64, h: 64 })
     .define("b", { x: 128, y: 64, w: 64, h: 64 })
     .define("c", { x: 128, y: 0, w: 64, h: 64 })
@@ -5191,6 +5503,7 @@ const tiles1 = new TileSet()
     .define("m", { x: 256, y: 64, w: 64, h: 64 })
     .define("n", { x: 256, y: 128, w: 64, h: 64 })
 tiles1.addHitEvent("0",Level.changeRoom);
+tiles1.addHitEvent("1",Level.changeRoom);
 const tiles2 = new TileSet()
     .define("0", { x: -64, y: -64, w: 64, h: 64 })
     .define("a", { x: 320, y: 0, w: 64, h: 64 })
@@ -5230,9 +5543,9 @@ const levelData = [{
             "hi0 ghhhhhhhhhhhhhhhhhhhhhhhhhhhhhha",
             "b         faab                     f",
             "b         ghhi                     f",
-            "b                                  f",
-            "addd                               f",
-            "aaaaddddddddddadddaadddaadddddadaadd",
+            "b                                   ",
+            "addd                               1",
+            "aaaaddddddddddadddaaddd  dddddadaadd",
         ],
         colliders: {
             a: true,
@@ -5379,15 +5692,117 @@ const levelData2 = [
         ],
     },
 ];
+const levelData3 = [{
+        x: 0,
+        y: 0,
+        z: 0.5,
+        data: [
+            "           l       l       a l      ",
+            "           m       m       h m      ",
+            "           m       m         m      ",
+            "           m       m         m      ",
+            "           m    h  m         m      ",
+            "           n    a  n         n      ",
+        ],
+    },
+    {
+        x: 0,
+        y: 0,
+        z: 1,
+        data: [
+            "aaaaahhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhha",
+            "aaaaahhj                                  ghhhha",
+            "aaaaahj                                     ghha",
+            "aahhj                                          f",
+            "hj                                             f",
+            "                                               f",
+            "1                                              f",
+            "aaaadddddddaaaaaaadddaaaaaadddaadddaadddddadaadd",
+        ],
+        colliders: {
+            a: true,
+            b: true,
+            c: true,
+            d: true,
+            e: true,
+            f: true,
+            g: true,
+            h: true,
+            i: true,
+        },
+    },
+
+    {
+        x: 0,
+        y: -1,
+        z: 1.5,
+        data: [
+            " l      l      l        l        l  ",
+            " m      m      m  ha    m  h     m f",
+            " m      m      m   h    m        m f",
+            " m      m      m        m        m  ",
+            " m      m      m        m        m  ",
+            " m      m      m        m        m  ",
+            " m      m      m  d     m    ec  m  ",
+            " n      n      n        n        n  ",
+        ],
+    },
+    {
+        x: 0,
+        y: -1,
+        z: 0.75,
+        data: [
+            "                                     ",
+            "                        j            ",
+            "                        k            ",
+            "                                     ",
+            "                                     ",
+            "                                     ",
+            "                                     ",
+            "                                     ",
+        ],
+    },
+    {
+        x: 0,
+        y: -1,
+        z: 1.25,
+        data: [
+            "                                    ",
+            "     j          j               j   ",
+            "     k          k               k   ",
+            "                                    ",
+            "                                    ",
+            "                                    ",
+            "                                    ",
+            "                                    ",
+        ],
+    },
+    {
+        x: -4,
+        y: -1,
+        z: 2,
+        data: [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaahaaaaaaa",
+            "aaaaaaaaaaaahaaaaaaahaaaaaaaaaabfaahaaaaaaaa",
+            "aaaabfaaaaaadaaaaaaadaabfaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaahaa",
+            "aaahaaabfaahaabfaahaaaaaahaaaabfaaaaaadaaaaa",
+            "aaadaaaaaaadaaaaaadaabfaadaaaaaahaaaaahaaaaa",
+            "aaaaaaaaaaaaaaahaaaaahaaaaaaaaabfaaaaaadaaaa",
+            "aaaaaaabfaaaaaadaaaaadaaabfaaaaaaaahaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaadaabfaaaaaaaa",
+        ],
+    },
+];
 const level = new Level("room_1", levelData,tiles1, {
     lights: new Float32Array([527, 147, 1.25, 526 + 256, 147, 0.75, 526 + 512, 147, 1.25]),
-    vias:{"0":{destination:"bank",off:{x:-64,y:65}}},
+    vias:{"0":{destination:"bank",off:{x:-64,y:65}},"1":{destination:"room_2",off:{x:64,y:64}}},
     // example interactables
     interactables: [
         {
             x: 20, y: 32, w: 96, h: 128,
             text: "Read sign",
-            lines: ["Deposits are stored in the back room.", "Watch out for... noises."],
+            lines: ["asdf."],
             once: false,
         },
     ],
@@ -5396,7 +5811,10 @@ const level2 = new Level("bank", levelData2,tiles2, {
     lights: new Float32Array([130, 147, 0.95, 130 + 158, 147, 0.95, 130+158*2, 147, 0.95, 130+158*3, 147, 0.95]),
     vias:{"0":{destination:"room_1",off:{x:64,y:0}}}
 });
-
+const level3 = new Level("room_2", levelData3,tiles1, {
+    lights: new Float32Array([130, 147, 0.95, 130 + 158, 147, 0.95, 130+158*2, 147, 0.95, 130+158*3, 147, 0.95]),
+    vias:{"1":{destination:"room_1",off:{x:64,y:0}}}
+});
 
 
 let entityHandler = new EntityHandler();
@@ -5405,9 +5823,9 @@ entityHandler.add(new Humanoid(256, 32, 1.001, "player"));
 // enemy placement
 EnemySpawn.define(
     {
-        level: "room_1",
+        level: "room_2",
         cls: ArachnidBoss,
-        x: 718, y: 64, z: 1.0018,
+        x: 918, y: 64, z: 1.0018,
         name: "spider",
         respawn: "never", 
         ai: "arachnid",
@@ -5418,13 +5836,53 @@ EnemySpawn.define(
 let Player = {};
 Player.entity = entityHandler.entities[0];
 Player.attack=new PlayerAttack(Player.entity);
+
+// Inventory
+//Bank: employees and laundering numbers
+//Dungeon: 3 weapons,top is active,  3 wearables
+//Wallet: gold on you, gold at bank, cash total
+
+
+// money and gear state
+
+Player.gold ??= 0;   // loose gold carried in the dungeons
+Player.bankGold ??= 0;     // gold currently deposited at the bank
+Player.cash ??= 0;    // laundered real currency
+Player.weapons ??= ["rustySword", null, null]; // slot 0 is the equipped one
+Player.wearables ??= [null, null, null];
+
+// each wearable has an always on effect
+Player.wearableEffects = {
+    sturdyBoots:  { label: "Sturdy Boots",   desc: "+20 max health",   apply: () => { Player.entity.maxHealth += 20; } },
+    swiftCloak:   { label: "Swift Cloak",    desc: "faster movement",  apply: () => { Player.speedMult = 1.25; } },
+    thievesGloves:{ label: "Thief's Gloves", desc: "gold piles +25%",  apply: () => { Player.goldMult = 1.25; } },
+};
+
+// reapply wearable effects
+Player.applyWearables = function () {
+    Player.speedMult = 1;
+    Player.goldMult = 1;
+    Player.entity.maxHealth = 100;
+    Player.entity.health = Math.min(Player.entity.health ?? 100, Player.entity.maxHealth);
+    for (const w of Player.wearables) {
+        if (w && Player.wearableEffects[w]) Player.wearableEffects[w].apply();
+    }
+};
+
+Player.equipWeapon = function (slot) {
+    if (slot < 0 || slot >= Player.weapons.length) return;
+    [Player.weapons[0], Player.weapons[slot]] = [Player.weapons[slot], Player.weapons[0]];
+    //the actual Weapon instance in the world just keeps its atlas name,
+    //which is what drives the sprite. combat stats could hang off Player.weapons[0] later.
+};
+
 Player.inventory = new Inventory(10);
 Player.update=function(){
   if (input.up() && Player.entity.hitbox.onGround) {
             Player.entity.hitbox.yv = 4.2;
         }
 
-            Player.entity.hitbox.xv += (Player.entity.hitbox.onGround ? 0.19 : 0.07)*input.ls.x;
+            Player.entity.hitbox.xv += (Player.entity.hitbox.onGround ? 0.19 : 0.07)*input.ls.x*(Player.speedMult ?? 1);
 
         Player.attack.update();
 
@@ -5449,10 +5907,11 @@ Player.damage=function(amount){
         entityHandler.startDeath(p);
     }
 };
+Player.applyWearables?.();
 Player.respawn=function(){
     const p = Player.entity;
     // reset body and health
-    p.health = 100;
+    p.health = Player.entity.maxHealth;
     p.dying = false;
     Player.dead = false;
     p.deathT = 0;
@@ -5475,12 +5934,13 @@ Player.respawn=function(){
 Player.sword = new Weapon(Player.entity, 6, 4, 0, 1, 32, 64, "rustySword");
 entityHandler.add(Player.sword);
 
-const levelsCondensed = [level,level2].reduce((accumulator, currentObject) => {
+const levelsCondensed = [level,level2,level3].reduce((accumulator, currentObject) => {
   accumulator[currentObject.name] = currentObject;
   return accumulator;
 }, {});
 let world=new World(Player,levelsCondensed)
 world.addTilemaps("room_1",[await atlas.setImage(room_1_tilemap),await atlasNormals.setImage(room_1_tilemap_normal)])
+world.addTilemaps("room_2",[await atlas.setImage(room_1_tilemap),await atlasNormals.setImage(room_1_tilemap_normal)])
 world.addTilemaps("bank",[await atlas.setImage(bank_tilemap),await atlasNormals.setImage(bank_tilemap_normal)])
 world.levelInd="bank";
 world.updateMesh();
@@ -5530,6 +5990,7 @@ const gameUI = new GameUI(gctx);
 const audioManager = new AudioManager({
     bank: "music/bankTheme.mp3",
     room_1: "music/storageTheme.mp3",
+    room_2: "music/storageTheme.mp3",
     menu: "music/menuTheme.mp3",
 }, 1.5);
 const roomFader = new Fader();
@@ -5544,15 +6005,19 @@ var player = {
     pz: 0
 };
 const uiShortcuts = {
+    // each handler checks its own screen is on top, otherwise a stale
+    // binding pops a screen it was never meant to touch (the m-key freeze)
     bindGameScreen() {
         ui.unbindAllShortcuts();
 
         ui.bindShortcut("m", () => {
+            if (ui.activeScreen !== gameScreen) return;
             ui.pushScreen(settingsScreen);
             this.bindSettingsScreen();
         });
 
         ui.bindShortcut("i", () => {
+            if (ui.activeScreen !== gameScreen) return;
             refreshInventoryScreen();
             ui.pushScreen(inventoryScreen);
             this.bindInventoryScreen();
@@ -5563,15 +6028,18 @@ const uiShortcuts = {
         ui.unbindAllShortcuts();
 
         ui.bindShortcut("m", () => {
+            if (ui.activeScreen !== settingsScreen) return;
             ui.popScreen();
-            if(ui.screenStack[ui.screenStack.length-1]==gameScreen){
-            uiShortcuts.bindGameScreen();
-        }else if(ui.screenStack[ui.screenStack.length-1]==root){
-            ui.unbindAllShortcuts();
-        }
+            if (ui.activeScreen === gameScreen) {
+                uiShortcuts.bindGameScreen();
+            } else if (ui.activeScreen === root) {
+                ui.unbindAllShortcuts();
+            }
         });
 
         ui.bindShortcut("i", () => {
+            if (ui.activeScreen !== settingsScreen) return;
+            ui.popScreen();
             refreshInventoryScreen();
             ui.pushScreen(inventoryScreen);
             this.bindInventoryScreen();
@@ -5582,17 +6050,28 @@ const uiShortcuts = {
         ui.unbindAllShortcuts();
 
         ui.bindShortcut("m", () => {
+            if (ui.activeScreen !== inventoryScreen) return;
             ui.popScreen();
             this.bindGameScreen();
         });
 
         ui.bindShortcut("i", () => {
+            if (ui.activeScreen !== inventoryScreen) return;
             ui.popScreen();
             this.bindSettingsScreen();
         });
     }
 };
 const ui = new UIManager(c);
+// swap themes per active screen: paper look for the inventory,
+// dark theme for non inventory screens
+const baseRendererTheme = ui.theme;
+const oldRender = ui.render.bind(ui);
+ui.render = function () {
+    ui.theme = ui.activeScreen === inventoryScreen ? baseRendererTheme : gameUITheme;
+    ui.renderer.theme = ui.theme;
+    return oldRender();
+};
 
 const mainMenu = new UIStack({
     width: UISize.percent(0.37),
@@ -5609,12 +6088,14 @@ mainMenu.add(
     new UILabel({
         text: "Honest",
         textAlign: "left",
-        font:"title"
+        font:"title",
+        style: { color: "#1e5622" }  // dark green title
     }),
     new UILabel({
         text: "Banker",
         textAlign: "left",
-        font:"title"
+        font:"title",
+        style: { color: "#1e5622" }
     }),
     new UILabel({
         text: "",
@@ -5627,10 +6108,18 @@ mainMenu.add(
         font: "body",
         style:{radius:8},
         onActivate: () => {
-        menuFader.run(() => {
-            uiShortcuts.bindGameScreen();
-            ui.setScreen(gameScreen);
-            audioManager.play(world.levelInd);
+        // intro cutscene with the no texture checkerboard
+        Cutscene.play([
+            { image: noTexTex, caption: "Honest Bank, est. 1976" },
+            { image: noTexTex, caption: "New management: Day 1" },
+        ], {
+            onDone: () => {
+                menuFader.run(() => {
+                    uiShortcuts.bindGameScreen();
+                    ui.setScreen(gameScreen);
+                    audioManager.play(world.levelInd);
+                });
+            }
         });
     }
     }),
@@ -5829,6 +6318,8 @@ gameScreen.addUpdater((input, ui, screen) => {
         gameUI.update();
         gameUI.draw(camera);
         Interaction.draw(camera, gctx);
+        //bank-gate popup sits above everything else
+        drawBankPopup(gctx);
 
         //transition overlays on top of everything
         roomFader.update();
@@ -5939,55 +6430,421 @@ const settingsScreen = makeMenu(
 );
 
 
-const inventoryScreen = makeMenu("Inventory", makeButton("Back", () => {
-    ui.popScreen();
-    if(ui.screenStack[ui.screenStack.length-1]==gameScreen){
-        uiShortcuts.bindGameScreen();
+// tabbed inventory screen
+const inventoryScreen = new UIStack({
+    width: UISize.fill(),
+    height: UISize.fill(),
+    direction: "column",
+    gap: 4,
+    align: "stretch",
+    padding: 16,
+    style: {}
+});
+
+// paper backdrop drawn under children
+inventoryScreen.drawContent = function (renderer) {
+    renderer.ctx?.drawImage(legalPadCanvas, 0, 0, BASE_W, BASE_H);
+};
+
+
+// BANK ONLY
+
+const inBank = () => world.levelInd === "bank";
+
+function bankOnly(action) {
+    return () => {
+        if (!inBank()) {
+            showBankPopup("Must be done at the bank.");
+            return;
+        }
+        action();
+        refreshInventoryScreen();
+    };
+}
+
+// handwritten sticky note popup: you have to be AT the bank for this
+const bankPopup = { active: false, text: "", timer: 0, fade: 0 };
+function showBankPopup(text) {
+    bankPopup.text = text;
+    bankPopup.active = true;
+    bankPopup.timer = 2.6;
+    bankPopup.fade = 0;
+}
+function updateBankPopup() {
+    if (!bankPopup.active) return;
+    bankPopup.timer -= 1 / 60;
+    if (bankPopup.timer <= 0) {
+        bankPopup.active = false;
+    } else {
+        bankPopup.fade = Math.min(1, bankPopup.fade + 0.12);
     }
-}));
+}
+function drawBankPopup(ctx) {
+    if (!bankPopup.active) return;
+    const alpha = bankPopup.timer < 0.5 ? bankPopup.timer / 0.5 : bankPopup.fade;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    // a torn yellow sticky note, slightly rotated
+    const w = 250, h = 66;
+    const x = (BASE_W - w) / 2, y = 96;
+    ctx.translate(x + w / 2, y + h / 2);
+    ctx.rotate(-0.04);
+    ctx.translate(-(x + w / 2), -(y + h / 2));
+    ctx.fillStyle = "#f8f0b8";
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 4);
+    ctx.fill();
+    ctx.strokeStyle = "#b8a050";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = "#5a4a20";
+    ctx.font = '20px "Grape Nuts"';
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(bankPopup.text, x + w / 2, y + h / 2 - 8);
+    ctx.font = '13px "Grape Nuts"';
+    ctx.fillStyle = "#8a7a40";
+    ctx.fillText("(the vault is back in the bank, you know)", x + w / 2, y + h / 2 + 16);
+    ctx.restore();
+}
+
+// deposit step: how much gold a single "Deposit" press moves.
+//Cycled with + - buttons so the player can make the right size deposit
+let depositStep = 50;
+
+let inventoryPage = "bank"; // "bank", "dungeon", "wallet"
+
+const inventoryTabBar = new UIStack({
+    direction: "row",
+    gap: 6,
+    align: "start",
+});
+const inventoryBody = new UIStack({
+    direction: "column",
+    gap: 1,
+    align: "start",
+    style: {}
+});
+
+function inventoryTabButton(name, label) {
+    const b = makeButton(label, () => {
+        inventoryPage = name;
+        refreshInventoryScreen();
+    }, "small");
+    b.isInventoryTab = true;
+    b.tabName = name;
+    return b;
+}
+
+inventoryScreen.add(
+    new UILabel({ text: "Inventory", font: "small", textAlign: "left" }),
+    inventoryTabBar,
+    inventoryBody
+);
 
 function refreshInventoryScreen() {
-    // remove old rows but keep the structure of the menu
-    const keep = 3; // title, spacer, back button
-    while (inventoryScreen.children.length > keep) {
-        inventoryScreen.remove(inventoryScreen.children[keep]);
+    // wipe dynamic content
+    inventoryTabBar.children.length = 0;
+    inventoryBody.children.length = 0;
+
+    //highlight the active one
+    for (const [name, label] of [
+        ["bank", "Bank"],
+        ["dungeon", "Dungeon"],
+        ["wallet", "Wallet"],
+    ]) {
+        const b = inventoryTabButton(name, inventoryPage === name ? `[ ${label} ]` : label);
+        inventoryTabBar.add(b);
     }
 
-    const inv = Player.inventory;
-    inventoryScreen.add(new UILabel({
-        text: `Gold: ${Player.gold ?? 0}`,
-        font: "body",
+    const addLabel = (text, opts = {}) => inventoryBody.add(new UILabel({
+        text,
+        font: opts.font ?? "small",
         textAlign: "left",
-        style: { color: "#FFD966" }
+        style: { color: opts.color }
     }));
 
-    const filled = inv.items.filter(Boolean);
+    if (inventoryPage === "bank") {
+        refreshBankPage(addLabel);
+    } else if (inventoryPage === "dungeon") {
+        refreshDungeonPage(addLabel);
+    } else {
+        refreshWalletPage(addLabel);
+    }
+
+    ui.render();
+}
+
+
+// Bank page: staff + laundering
+
+const bankStaff = {
+    heat: 0,     // 0..100 how hot the books are
+    heatRisk: 60,    // crossing this triggers consequences (audit etc.)
+    heatCooldown: 0.02, // heat lost per second as the books cool off
+    teller: {
+        name: "Teller",
+        // gold -> cash conversion
+        rate: 0.6,    // cash per gold before bonuses
+        fee: 0.1,  // flat % skimmed as the teller's cut
+        skill: 1,   // how many "accounts" she cycles gold through;
+    },
+    loanOfficer: {
+        name: "Loan Officer",
+        // cash -> gold laundering backstop: advances cash against deposited gold
+        advanceRate: 0.5, // fraction of bankGold they'll front as cash
+        interest: 0.2,  // paid back on the advance
+        limit: 500,     // max advance
+    },
+};
+
+/*
+Laundering chain:
+
+1.physical gold t0 bank gold. dirty cash enters the system. Adds HEAT exp proportional to the amount.
+
+2. bank gold to cash. the teller cycles gold through fake accounts (skill), each hop
+shaves a little value (fee) but adding legitimacy. More skill more hops is cleaner cash.
+
+3. cash is now spendable. The loan officer's loans are legitimate so taking an advance slightly
+lowers heat while costing you interest.
+
+Heat cools on its own over time.
+*/
+function launder(amount) {
+    // turn deposited bank gold into cash through the teller
+    const t = bankStaff.teller;
+    const gold = Math.min(amount, Player.bankGold ?? 0);
+    if (gold <= 0) return 0;
+    Player.bankGold -= gold;
+
+    //each "hop" loses a slice (the fee), so effective rate
+    // falls as more accounts are involved, heat also drops faster
+    const hops = Math.max(1, Math.round(t.skill));
+    const hopLoss = 1 - t.fee;
+    const gross = gold * t.rate * Math.pow(hopLoss, hops - 1);
+    const cash = gross * (1 - t.fee);
+    Player.cash = (Player.cash ?? 0) + cash;
+
+    // layering cleans: heat falls proportional to how much was moved
+    // and how thorough the teller was
+    bankStaff.heat = Math.max(0, bankStaff.heat - gold * 0.02 * hops / 100);
+    return cash;
+}
+
+function takeAdvance(amount) {
+    // loan officer fronts cash against gold sitting in the bank.
+    // Back to back loans are a real integration technique
+    // is legitimate income, so this slightly reduces heat.
+    const o = bankStaff.loanOfficer;
+    const cash = Math.min(amount, Player.bankGold * o.advanceRate, o.limit);
+    if (cash <= 0) return 0;
+    Player.cash = (Player.cash ?? 0) + cash;
+    Player.bankGold -= cash / (1 - o.interest); // pay it back out of stored gold
+    bankStaff.heat = Math.max(0, bankStaff.heat - 2); // looks like secured lending
+    return cash;
+}
+
+function depositGold(amount) {
+    const g = Math.min(amount, Player.gold ?? 0);
+    if (g <= 0) return;
+    Player.gold -= g;
+    Player.bankGold = (Player.bankGold ?? 0) + g;
+    bankStaff.heat = Math.min(100,
+        bankStaff.heat + Math.pow(g, 1.15) / 400); //big depo are hot
+}
+
+// heat cools as the books cool
+function coolHeat() {
+    bankStaff.heat = Math.max(0, bankStaff.heat - bankStaff.heatCooldown);
+    if (bankStaff.heat > bankStaff.heatRisk) {
+        // consequences
+        // gameUI.flash("THE BOOKS ARE HOT");
+    }
+}
+
+function refreshBankPage(addLabel) {
+    const t = bankStaff.teller;
+    const o = bankStaff.loanOfficer;
+
+    // three side by side columns
+    const tellerCol = new UIStack({ direction: "column", gap: 1, align: "start" });
+    const officerCol = new UIStack({ direction: "column", gap: 1, align: "start" });
+    const actionCol = new UIStack({ direction: "column", gap: 1, align: "start" });
+
+    const colLabel = (col, text, color) => col.add(new UILabel({
+        text, font: "small", textAlign: "left", style: { color }
+    }));
+
+    // newline + tab puts value on its own line, indented
+    const stat = (col, label, value, color) => colLabel(col,
+        `${label}:\n\t${value}`, color);
+
+    colLabel(tellerCol, "— Teller —", "#1e3a5c");
+    stat(tellerCol, "Conversion rate", `${(t.rate * t.skill).toFixed(2)} cash/gold`);
+    stat(tellerCol, "Fee", `${Math.round(t.fee * 100)}%`);
+    tellerCol.add(makeButton("Rate +0.05", bankOnly(() => {
+        t.skill += 0.05 / t.rate;
+    }), "small"));
+    tellerCol.add(makeButton("Fee -1%", bankOnly(() => {
+        t.fee = Math.max(0, t.fee - 0.01);
+    }), "small"));
+
+    colLabel(officerCol, "— Loan Officer —", "#1e3a5c");
+    stat(officerCol, "Advance rate", `${Math.round(o.advanceRate * 100)}% of bank gold`);
+    stat(officerCol, "Interest", `${Math.round(o.interest * 100)}%`);
+    stat(officerCol, "Advance limit", `$${o.limit}`);
+    officerCol.add(makeButton("Advance rate +5%", bankOnly(() => {
+        o.advanceRate = Math.min(1, o.advanceRate + 0.05);
+    }), "small"));
+    officerCol.add(makeButton("Limit +$100", bankOnly(() => {
+        o.limit += 100;
+    }), "small"));
+
+    colLabel(actionCol, "— Books —", "#1e3a5c");
+    const heat = Math.round(bankStaff.heat);
+    const heatColor = heat > bankStaff.heatRisk ? "#8a1414" : heat > bankStaff.heatRisk * 0.6 ? "#7a4a10" : "#1e5622";
+    stat(actionCol, "Heat", `${heat}/100`, heatColor);
+    if (heat > bankStaff.heatRisk) colLabel(actionCol, "!! AUDIT RISK !!", "#8a1414");
+
+    // partial deposits
+    const pocket = Math.floor(Player.gold ?? 0);
+    const step = Math.min(depositStep, Math.max(1, pocket));
+    stat(actionCol, "Deposit step", `${depositStep} gold`);
+    actionCol.add(makeButton("step -50", bankOnly(() => {
+        depositStep = Math.max(10, depositStep - 50);
+    }), "small"));
+    actionCol.add(makeButton("step +50", bankOnly(() => {
+        depositStep = Math.min(1000, depositStep + 50);
+    }), "small"));
+    actionCol.add(makeButton(`Deposit ${step} gold`, bankOnly(() => {
+        depositGold(step);
+    }), "small"));
+    actionCol.add(makeButton("Launder all bank gold", bankOnly(() => {
+        launder(Player.bankGold ?? 0);
+    }), "small"));
+    actionCol.add(makeButton("Take max cash advance", bankOnly(() => {
+        takeAdvance(o.limit);
+    }), "small"));
+    if (!inBank()) {
+        colLabel(actionCol, "(bank actions need the bank)", "#6a4a10");
+    }
+
+    // all three staff/books columns sit in one row; nothing stacks below
+    inventoryBody.add(new UIStack({
+        direction: "row", gap: 18, align: "start"
+    }).add(tellerCol, officerCol, actionCol));
+}
+
+
+// Dungeon page: 3 weapon slots top active, 3 wearables
+function refreshDungeonPage(addLabel) {
+    // weapons column and wearables column
+    const weaponCol = new UIStack({ direction: "column", gap: 1, align: "start" });
+    const wearableCol = new UIStack({ direction: "column", gap: 1, align: "start" });
+    const pocketCol = new UIStack({ direction: "column", gap: 1, align: "start" });
+
+    weaponCol.add(new UILabel({
+        text: "— Weapons (top = ACTIVE) —", font: "small",
+        textAlign: "left", style: { color: "#5a3a10" }
+    }));
+    Player.weapons.forEach((w, i) => {
+        const tag = i === 0 ? "  <-- ACTIVE" : "";
+        const b = makeButton(
+            `${i === 0 ? "[*]" : "[ ]"} ${w ?? "(empty slot)"}${tag}`,
+            () => {
+                if (w) Player.equipWeapon(i); // swap into the top slot
+                refreshInventoryScreen();
+            },
+            "small"
+        );
+        if (i === 0) b.style = { ...b.style, color: "#7a5210" };
+        weaponCol.add(b);
+    });
+
+    wearableCol.add(new UILabel({
+        text: "— Wearables (always active) —", font: "small",
+        textAlign: "left", style: { color: "#3a2a5c" }
+    }));
+    const keys = Object.keys(Player.wearableEffects);
+    Player.wearables.forEach((wn, i) => {
+        const effect = wn ? Player.wearableEffects[wn] : null;
+        const label = effect
+            ? `${effect.label} — ${effect.desc}`
+            : "(empty slot)";
+        wearableCol.add(makeButton(`[W${i + 1}] ${label}`, () => {
+            const cur = keys.indexOf(wn);
+            Player.wearables[i] = keys[(cur + 1) % (keys.length + 1)] ?? null;
+            Player.applyWearables();
+            refreshInventoryScreen();
+        }, "small"));
+    });
+
+    pocketCol.add(new UILabel({
+        text: "— Pockets —", font: "small",
+        textAlign: "left", style: { color: "#55503f" }
+    }));
+    const filled = Player.inventory.items.filter(Boolean);
     if (filled.length === 0) {
-        inventoryScreen.add(new UILabel({
-            text: "(empty pockets)",
-            font: "small",
-            textAlign: "left",
+        pocketCol.add(new UILabel({
+            text: "(empty)", font: "small", textAlign: "left",
             style: { color: "muted" }
         }));
     } else {
         for (const item of filled) {
-            // gold piles are shown also
-            const label = item.amount ? `${item.name} x${item.amount}` : item.name;
-            inventoryScreen.add(new UILabel({
-                text: `- ${label}`,
-                font: "body",
-                textAlign: "left"
+            pocketCol.add(new UILabel({
+                text: `- ${item.amount ? `${item.name} x${item.amount}` : item.name}`,
+                font: "small", textAlign: "left"
             }));
         }
     }
 
-    inventoryScreen.add(new UILabel({
-        text: `Slots: ${filled.length}/${inv.items.length}`,
-        font: "small",
-        textAlign: "left",
-        style: { color: "muted" }
-    }));
+    inventoryBody.add(new UIStack({
+        direction: "row", gap: 24, align: "start"
+    }).add(weaponCol, wearableCol));
+    inventoryBody.add(pocketCol);
 }
+
+
+// Wallet page: money totals
+
+function refreshWalletPage(addLabel) {
+    // gold column left, cash column right
+    const goldCol = new UIStack({ direction: "column", gap: 1, align: "start" });
+    const cashCol = new UIStack({ direction: "column", gap: 1, align: "start" });
+
+    goldCol.add(new UILabel({
+        text: "— Gold —", font: "small", textAlign: "left",
+        style: { color: "#7a5a10" }
+    }));
+    goldCol.add(new UILabel({
+        text: `On you:  ${Math.floor(Player.gold ?? 0)}`,
+        font: "small", textAlign: "left"
+    }));
+    goldCol.add(new UILabel({
+        text: `At bank: ${Math.floor(Player.bankGold ?? 0)}`,
+        font: "small", textAlign: "left"
+    }));
+
+    cashCol.add(new UILabel({
+        text: "— Cash —", font: "small", textAlign: "left",
+        style: { color: "#1e4a22" }
+    }));
+    cashCol.add(new UILabel({
+        text: `Total: $${(Player.cash ?? 0).toFixed(2)}`,
+        font: "small", textAlign: "left"
+    }));
+    cashCol.add(new UILabel({
+        text: `Net worth: $${(((Player.bankGold ?? 0) * bankStaff.teller.rate * (1 - bankStaff.teller.fee)) + (Player.cash ?? 0)).toFixed(2)}`,
+        font: "small", textAlign: "left", style: { color: "muted" }
+    }));
+
+    inventoryBody.add(new UIStack({
+        direction: "row", gap: 24, align: "start"
+    }).add(goldCol, cashCol));
+}
+
+refreshInventoryScreen();
 
 //respawn at the OG spawn point for now
 const deathScreen = makeMenu(
@@ -6042,6 +6899,136 @@ window.addEventListener("keydown", (e) => {
     }
 });
  */
+//Cutscene can take a list of imageBitmaps and captions in the form {image, caption}
+class Cutscene {
+    static images = [];
+    static index = 0;
+    static active = false;
+    static onDone = null;
+    static fade = 0;//alpha for the slides
+    static imageFade = 0;//current fade value
+    static wasConfirm = false;
+
+    static play(entries, options = {}) {
+        this.images = entries.map(e =>
+            typeof e === "string" || e instanceof ImageBitmap || e instanceof HTMLImageElement
+                ? { image: e, caption: null }
+                : e
+        );
+        this.index = 0;
+        this.active = this.images.length > 0;
+        this.onDone = options.onDone ?? null;
+        this.fade = this.active ? 1 : 0;
+        this.imageFade = 0;
+        this.wasConfirm = true; // ignore the press that started it
+        if (this.active) {
+            // preload the first image
+            this.loadImage(0);
+        }
+    }
+
+    static loaded = new Map(); // url to image
+    static loadImage(entry) {
+        if (!entry) return;
+        if (typeof entry.image === "string") {
+            if (this.loaded.has(entry.image)) {
+                entry.el = this.loaded.get(entry.image);
+                return;
+            }
+            const img = new Image();
+            img.onload = () => { this.loaded.set(entry.image, img); };
+            img.src = entry.image;
+            entry.el = img;
+        } else {
+            entry.el = entry.image;
+        }
+    }
+
+    static skip() {
+        this.index++;
+        this.imageFade = 0;
+        if (this.index >= this.images.length) {
+            this.active = false;
+            this.onDone?.();
+            this.onDone = null;
+        } else {
+            this.loadImage(this.images[this.index]);
+        }
+    }
+
+    static stop() {
+        this.active = false;
+        this.onDone?.();
+        this.onDone = null;
+    }
+
+    static update() {
+        if (this.fade > 0) this.fade = Math.max(0, this.fade - 0.06);
+        if (!this.active) return;
+
+        const cur = this.images[this.index];
+        const loaded = cur.el && (cur.el.complete ?? true) && (cur.el.naturalWidth ?? 1) > 0;
+        if (loaded) this.imageFade = Math.min(1, this.imageFade + 0.05);
+
+        // any new confirm press
+        const confirmDown =
+            input.isKeyDown("Enter") ||
+            input.isKeyDown(" ") ||
+            input.mousePressed ||
+            (!!input.gamepad && !!input.buttons[0]);
+        if (confirmDown && !this.wasConfirm) this.skip();
+        this.wasConfirm = confirmDown;
+    }
+
+    static draw(ctx) {
+        ctx.save();
+        // when not active, only draw the fading out if one just ended
+        if (this.active || this.fade > 0) {
+            ctx.globalAlpha = this.active ? 1 : Math.max(0, 1 - this.fade);
+            ctx.fillStyle = "#000";
+            ctx.fillRect(0, 0, BASE_W, BASE_H);
+        }
+
+        if (this.active) {
+            const cur = this.images[this.index];
+            const img = cur?.el;
+            if (img && (img.complete ?? true) && (img.naturalWidth ?? img.width ?? 0) > 0) {
+                ctx.globalAlpha = this.imageFade;
+                // contain fit the image on screen
+                const scale = Math.min(BASE_W / img.width, BASE_H / img.height);
+                const dw = img.width * scale, dh = img.height * scale;
+                ctx.imageSmoothingEnabled = false;
+                ctx.drawImage(img, (BASE_W - dw) / 2, (BASE_H - dh) / 2, dw, dh);
+            }
+
+            if (cur?.caption) {
+                ctx.globalAlpha = 1;
+                ctx.fillStyle = "rgba(8,8,14,0.85)";
+                ctx.fillRect(0, BASE_H - 64, BASE_W, 64);
+                ctx.fillStyle = "#FFEEBB";
+                ctx.font = "18px \"IM Fell DW Pica\"";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillText(cur.caption, BASE_W / 2, BASE_H - 32);
+            }
+
+            // "press any key" hint
+            ctx.globalAlpha = 0.5 + Math.sin(frameCount * 0.08) * 0.2;
+            ctx.fillStyle = "#aaaab7";
+            ctx.font = "12px \"IM Fell DW Pica\"";
+            ctx.textAlign = "right";
+            ctx.fillText("[space] next", BASE_W - 14, BASE_H - 14);
+        }
+        ctx.restore();
+
+        if (this.active) {
+            this.fade = Math.min(1, this.fade + 0.06);
+        } else {
+            this.fade = 0;
+        }
+    }
+}
+
 var frameCount = 0;
 var now;
 const frameTime = 1000 / 60;
@@ -6058,6 +7045,8 @@ function draw(now) {
 
 
         nextFrame += stepGate;
+        Cutscene.update();
+        if (!Cutscene.active) {
         input.updatePre();
         ui.update(input);
       
@@ -6065,10 +7054,24 @@ function draw(now) {
 
         //transitions and audio run globally
         audioManager.update();
+        //immersive room audio :D
+        SpatialAudio.updateRoom(world.level, Player.entity.hitbox);
+        // heat cools 1x per second
+        if (frameCount % 60 === 0) coolHeat();
+        updateBankPopup();
         roomFader.update();
         menuFader.update();
+        }
+        //cutscene overlay takes over the screen while active
+        Cutscene.draw(ctx);
         //draw whichever overlay is active on the visible canvas
         menuFader.draw(ctx);
+        if (Cutscene.active) {
+            input.updatePost();
+            frameCount++;
+            requestAnimationFrame(draw);
+            return;
+        }
         if (roomFader.active) menuFader.draw(ctx);
 
         ctx.fillStyle = "rgb(200,200,200)";
@@ -6091,5 +7094,5 @@ function draw(now) {
 for (let i = window.requestAnimationFrame(function() {}); i > 0; i--)
     window.cancelAnimationFrame(i);
 draw();
-
+ 
 //<script>
